@@ -1,0 +1,66 @@
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import mongoose from "mongoose";
+import Article from "./models/Article";
+import { verifyAuth, AuthedRequest } from "./middleware/verifyAuth";
+
+const app = express();
+const PORT = 8000;
+const MONGO_URI = process.env.MONGO_URI as string;
+
+app.use(cors());
+app.use(express.json());
+
+app.get("/api/articles", async (req, res) => {
+  const articles = await Article.find();
+  res.json(articles);
+});
+
+app.get("/api/articles/:name", async (req, res) => {
+  const article = await Article.findOne({ name: req.params.name });
+  if (!article) {
+    return res.status(404).json({ error: "Article not found" });
+  }
+  res.json(article);
+});
+
+app.post("/api/articles/:name/upvote", verifyAuth, async (req, res) => {
+  const article = await Article.findOne({ name: req.params.name });
+  if (!article) {
+    return res.status(404).json({ error: "Article not found" });
+  }
+  article.upvotes += 1;
+  await article.save();
+  res.json(article);
+});
+
+app.post(
+  "/api/articles/:name/comments",
+  verifyAuth,
+  async (req: AuthedRequest, res) => {
+    const { text } = req.body;
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "text is required" });
+    }
+    const article = await Article.findOne({ name: req.params.name });
+    if (!article) {
+      return res.status(404).json({ error: "Article not found" });
+    }
+    article.comments.push({ postedBy: req.user?.email || "Anonymus", text });
+    await article.save();
+    res.json(article);
+  },
+);
+
+mongoose
+  .connect(MONGO_URI)
+  .then(() => {
+    console.log("Connected to MongoDB");
+    app.listen(PORT, () => {
+      console.log(`Server is listening on port ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error("MongoDB connection error:", err);
+  });
