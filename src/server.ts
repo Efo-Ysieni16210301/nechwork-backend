@@ -3,12 +3,17 @@ import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
 import Article from "./models/Article";
+import Product from "./models/Product";
+import Order from "./models/Order";
 import { verifyAuth, AuthedRequest } from "./middleware/verifyAuth";
 import { actionLimiter } from "./middleware/rateLimiter";
 import { requireAdmin } from "./middleware/requireAdmin";
 const app = express();
-const PORT = 8000;
-const MONGO_URI = process.env.MONGO_URI as string;
+const PORT = Number(process.env.PORT || 8000);
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) {
+  throw new Error("MONGO_URI is required");
+}
 app.set("trust proxy", 1);
 app.use(
   cors({
@@ -16,6 +21,69 @@ app.use(
   }),
 );
 app.use(express.json());
+
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+app.get("/api/products", async (req, res) => {
+  const category = typeof req.query.category === "string" ? req.query.category : undefined;
+  const filter = category && category !== "All" ? { active: true, category } : { active: true };
+  const products = await Product.find(filter).sort({ createdAt: -1 }).lean();
+  res.json(products);
+});
+
+app.get("/api/products/:id", async (req, res) => {
+  const product = await Product.findOne({ id: req.params.id, active: true }).lean();
+  if (!product) return res.status(404).json({ error: "Product not found" });
+  res.json(product);
+});
+
+app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  const { items, shipping } = req.body as {
+    items?: Array<{ productId?: unknown; quantity?: unknown }>;
+    shipping?: Record<string, unknown>;
+  };
+  if (!Array.isArray(items) || items.length === 0 || !shipping) {
+    return res.status(400).json({ error: "items and shipping are required" });
+  }
+  const validItems = items.every((item) =>
+    typeof item.productId === "string" &&
+    typeof item.quantity === "number" &&
+    Number.isInteger(item.quantity) &&
+    item.quantity > 0 &&
+    item.quantity <= 99,
+  );
+  const requiredShipping = ["firstName", "lastName", "address", "city", "postalCode"];
+  if (!validItems || requiredShipping.some((field) => typeof shipping[field] !== "string" || !shipping[field])) {
+    return res.status(400).json({ error: "Invalid order items or shipping details" });
+  }
+
+  const productIds = items.map((item) => item.productId as string);
+  const products = await Product.find({ id: { $in: productIds }, active: true }).lean();
+  if (products.length !== new Set(productIds).size) {
+    return res.status(400).json({ error: "One or more products are unavailable" });
+  }
+
+  const orderItems = items.map((item) => {
+    const product = products.find((candidate) => candidate.id === item.productId);
+    return { productId: product!.id, name: product!.name, price: product!.price, quantity: item.quantity as number };
+  });
+  const subtotal = orderItems.reduce((total, item) => total + item.price * item.quantity, 0);
+  const order = await Order.create({
+    userId: req.user!.uid,
+    email: req.user!.email,
+    items: orderItems,
+    shipping,
+    subtotal: Math.round(subtotal * 100) / 100,
+  });
+  res.status(201).json(order);
+});
+
+app.get("/api/orders", verifyAuth, async (req: AuthedRequest, res) => {
+  const orders = await Order.find({ userId: req.user!.uid }).sort({ createdAt: -1 }).lean();
+  res.json(orders);
+});
 
 app.get("/api/articles", async (req, res) => {
   const articles = await Article.find();
