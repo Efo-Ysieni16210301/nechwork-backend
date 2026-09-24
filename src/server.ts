@@ -80,6 +80,41 @@ app.post(
   },
 );
 
+app.put(
+  "/api/products/:id",
+  actionLimiter,
+  verifyAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const { name, category, description, price, image, badge } = req.body;
+    if (
+      typeof name !== "string" || !name.trim() ||
+      typeof category !== "string" || !category.trim() ||
+      typeof description !== "string" || !description.trim() ||
+      typeof price !== "number" || !Number.isFinite(price) || price < 0 ||
+      typeof image !== "string" || !image.trim()
+    ) {
+      return res.status(400).json({
+        error: "name, category, description, non-negative price, and image are required",
+      });
+    }
+    const product = await Product.findOneAndUpdate(
+      { id: req.params.id },
+      {
+        name: name.trim(),
+        category: category.trim(),
+        description: description.trim(),
+        price: Math.round(price * 100) / 100,
+        image: image.trim(),
+        badge: typeof badge === "string" && badge.trim() ? badge.trim() : undefined,
+      },
+      { new: true, runValidators: true },
+    );
+    if (!product) return res.status(404).json({ error: "Product not found" });
+    res.json(product);
+  },
+);
+
 app.delete(
   "/api/products/:id",
   actionLimiter,
