@@ -1,7 +1,9 @@
-import mongoose, { Schema, Document } from "mongoose";
+import mongoose, { Schema, Document, Types } from "mongoose";
 
 interface Comment {
+  _id: Types.ObjectId;
   postedBy: string;
+  uid: string;
   text: string;
 }
 
@@ -10,11 +12,12 @@ export interface IArticle extends Document {
   title: string;
   content: string[];
   upvotes: number;
-  comments: Comment[];
+  comments: Types.DocumentArray<Comment>;
 }
 
 const CommentSchema = new Schema<Comment>({
   postedBy: { type: String, required: true },
+  uid: { type: String, required: true },
   text: { type: String, required: true },
 });
 

@@ -40,19 +40,82 @@ app.post(
   verifyAuth,
   async (req: AuthedRequest, res) => {
     const { text } = req.body;
+
     if (!text || typeof text !== "string") {
       return res.status(400).json({ error: "text is required" });
     }
+
     const article = await Article.findOne({ name: req.params.name });
     if (!article) {
       return res.status(404).json({ error: "Article not found" });
     }
-    article.comments.push({ postedBy: req.user?.email || "Anonymus", text });
+
+    article.comments.push({
+      postedBy: req.user?.email || "Anonymous",
+      uid: req.user!.uid,
+      text,
+    } as any);
+    await article.save();
+    res.json(article);
+  },
+);
+app.patch(
+  "/api/articles/:name/comments/:commentId",
+  verifyAuth,
+  async (req: AuthedRequest, res) => {
+    const { text } = req.body;
+
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "text is required" });
+    }
+
+    const article = await Article.findOne({ name: req.params.name });
+    if (!article) {
+      return res.status(404).json({ error: "Article not found" });
+    }
+
+    const comment = article.comments.id(req.params.commentId as string);
+    if (!comment) {
+      return res.status(404).json({ error: "Comment not found" });
+    }
+
+    if (comment.uid !== req.user!.uid) {
+      return res
+        .status(403)
+        .json({ error: "You can only edit your own comments" });
+    }
+
+    comment.text = text;
     await article.save();
     res.json(article);
   },
 );
 
+app.delete(
+  "/api/articles/:name/comments/:commentId",
+  verifyAuth,
+  async (req: AuthedRequest, res) => {
+    const article = await Article.findOne({ name: req.params.name });
+    if (!article) {
+      return res.status(404).json({ error: "Article not found" });
+    }
+
+    const comment = article.comments.id(req.params.commentId as string);
+    if (!comment) {
+      return res.status(404).json({ error: "Comment not found" });
+    }
+
+    if (comment.uid !== req.user!.uid) {
+      return res
+        .status(403)
+        .json({ error: "You can only delete your own comments" });
+    }
+
+    comment.deleteOne();
+    await article.save();
+    res.json(article);
+  },
+);
 mongoose
   .connect(MONGO_URI)
   .then(() => {
