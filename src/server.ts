@@ -4,12 +4,17 @@ import cors from "cors";
 import mongoose from "mongoose";
 import Article from "./models/Article";
 import { verifyAuth, AuthedRequest } from "./middleware/verifyAuth";
+import { actionLimiter } from "./middleware/rateLimiter";
 
 const app = express();
 const PORT = 8000;
 const MONGO_URI = process.env.MONGO_URI as string;
-
-app.use(cors());
+app.set("trust proxy", 1);
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+  }),
+);
 app.use(express.json());
 
 app.get("/api/articles", async (req, res) => {
@@ -25,18 +30,24 @@ app.get("/api/articles/:name", async (req, res) => {
   res.json(article);
 });
 
-app.post("/api/articles/:name/upvote", verifyAuth, async (req, res) => {
-  const article = await Article.findOne({ name: req.params.name });
-  if (!article) {
-    return res.status(404).json({ error: "Article not found" });
-  }
-  article.upvotes += 1;
-  await article.save();
-  res.json(article);
-});
+app.post(
+  "/api/articles/:name/upvote",
+  actionLimiter,
+  verifyAuth,
+  async (req, res) => {
+    const article = await Article.findOne({ name: req.params.name });
+    if (!article) {
+      return res.status(404).json({ error: "Article not found" });
+    }
+    article.upvotes += 1;
+    await article.save();
+    res.json(article);
+  },
+);
 
 app.post(
   "/api/articles/:name/comments",
+  actionLimiter,
   verifyAuth,
   async (req: AuthedRequest, res) => {
     const { text } = req.body;
@@ -59,8 +70,10 @@ app.post(
     res.json(article);
   },
 );
+
 app.patch(
   "/api/articles/:name/comments/:commentId",
+  actionLimiter,
   verifyAuth,
   async (req: AuthedRequest, res) => {
     const { text } = req.body;
@@ -93,6 +106,7 @@ app.patch(
 
 app.delete(
   "/api/articles/:name/comments/:commentId",
+  actionLimiter,
   verifyAuth,
   async (req: AuthedRequest, res) => {
     const article = await Article.findOne({ name: req.params.name });
@@ -116,6 +130,7 @@ app.delete(
     res.json(article);
   },
 );
+
 mongoose
   .connect(MONGO_URI)
   .then(() => {
