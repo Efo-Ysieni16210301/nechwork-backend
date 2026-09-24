@@ -4,7 +4,7 @@ import cors from "cors";
 import mongoose from "mongoose";
 import Article from "./models/Article";
 import Product from "./models/Product";
-import Order from "./models/Order";
+import Order, { ORDER_STATUSES, PAYMENT_METHODS } from "./models/Order";
 import { verifyAuth, AuthedRequest } from "./middleware/verifyAuth";
 import { actionLimiter } from "./middleware/rateLimiter";
 import { requireAdmin } from "./middleware/requireAdmin";
@@ -132,13 +132,30 @@ app.delete(
 );
 
 app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
-  const { items, shipping } = req.body as {
+  const { items, shipping, paymentMethod, transactionId, paymentProofUrl } = req.body as {
     items?: Array<{ productId?: unknown; quantity?: unknown }>;
     shipping?: Record<string, unknown>;
+    paymentMethod?: unknown;
+    transactionId?: unknown;
+    paymentProofUrl?: unknown;
   };
-  if (!Array.isArray(items) || items.length === 0 || !shipping) {
-    return res.status(400).json({ error: "items and shipping are required" });
+  if (
+    !Array.isArray(items) ||
+    items.length === 0 ||
+    !shipping ||
+    typeof paymentMethod !== "string" ||
+    !PAYMENT_METHODS.includes(paymentMethod.trim().toLowerCase() as (typeof PAYMENT_METHODS)[number]) ||
+    typeof transactionId !== "string" ||
+    !transactionId.trim() ||
+    transactionId.length > 200 ||
+    typeof paymentProofUrl !== "string" ||
+    !/^https?:\/\/[^\s]+$/i.test(paymentProofUrl.trim())
+  ) {
+    return res.status(400).json({
+      error: "items, shipping, payment method, transaction ID, and a valid payment proof URL are required",
+    });
   }
+  const normalizedPaymentMethod = paymentMethod.trim().toLowerCase() as (typeof PAYMENT_METHODS)[number];
   const validItems = items.every((item) =>
     typeof item.productId === "string" &&
     typeof item.quantity === "number" &&
@@ -168,6 +185,9 @@ app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, re
     items: orderItems,
     shipping,
     subtotal: Math.round(subtotal * 100) / 100,
+    paymentMethod: normalizedPaymentMethod,
+    transactionId: transactionId.trim(),
+    paymentProofUrl: paymentProofUrl.trim(),
   });
   res.status(201).json(order);
 });
@@ -176,6 +196,45 @@ app.get("/api/orders", verifyAuth, async (req: AuthedRequest, res) => {
   const orders = await Order.find({ userId: req.user!.uid }).sort({ createdAt: -1 }).lean();
   res.json(orders);
 });
+
+app.get(
+  "/api/admin/orders",
+  verifyAuth,
+  requireAdmin,
+  async (_req: AuthedRequest, res) => {
+    const orders = await Order.find().sort({ createdAt: -1 }).lean();
+    res.json(orders);
+  },
+);
+
+app.patch(
+  "/api/admin/orders/:id/status",
+  actionLimiter,
+  verifyAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const { status } = req.body as { status?: unknown };
+    if (
+      typeof status !== "string" ||
+      !ORDER_STATUSES.includes(status as (typeof ORDER_STATUSES)[number])
+    ) {
+      return res.status(400).json({
+        error: `status must be one of: ${ORDER_STATUSES.join(", ")}`,
+      });
+    }
+    if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
+      return res.status(400).json({ error: "Invalid order ID" });
+    }
+
+    const order = await Order.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true, runValidators: true },
+    );
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    res.json(order);
+  },
+);
 
 app.get("/api/articles", async (req, res) => {
   const articles = await Article.find();
