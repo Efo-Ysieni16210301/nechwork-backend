@@ -39,6 +39,63 @@ app.get("/api/products/:id", async (req, res) => {
   res.json(product);
 });
 
+app.post(
+  "/api/products",
+  actionLimiter,
+  verifyAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const { id, name, category, description, price, image, badge } = req.body;
+    if (
+      typeof id !== "string" ||
+      !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id) ||
+      typeof name !== "string" ||
+      !name.trim() ||
+      typeof category !== "string" ||
+      !category.trim() ||
+      typeof description !== "string" ||
+      !description.trim() ||
+      typeof price !== "number" ||
+      !Number.isFinite(price) ||
+      price < 0 ||
+      typeof image !== "string" ||
+      !image.trim()
+    ) {
+      return res.status(400).json({
+        error: "id, name, category, description, non-negative price, and image are required",
+      });
+    }
+    const existing = await Product.findOne({ id });
+    if (existing) return res.status(409).json({ error: "A product with this id already exists" });
+    const product = await Product.create({
+      id: id.trim(),
+      name: name.trim(),
+      category: category.trim(),
+      description: description.trim(),
+      price: Math.round(price * 100) / 100,
+      image: image.trim(),
+      badge: typeof badge === "string" && badge.trim() ? badge.trim() : undefined,
+    });
+    res.status(201).json(product);
+  },
+);
+
+app.delete(
+  "/api/products/:id",
+  actionLimiter,
+  verifyAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const product = await Product.findOneAndUpdate(
+      { id: req.params.id },
+      { active: false },
+      { new: true },
+    );
+    if (!product) return res.status(404).json({ error: "Product not found" });
+    res.json({ message: "Product archived" });
+  },
+);
+
 app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
   const { items, shipping } = req.body as {
     items?: Array<{ productId?: unknown; quantity?: unknown }>;
