@@ -5,7 +5,7 @@ import mongoose from "mongoose";
 import Article from "./models/Article";
 import { verifyAuth, AuthedRequest } from "./middleware/verifyAuth";
 import { actionLimiter } from "./middleware/rateLimiter";
-
+import { requireAdmin } from "./middleware/requireAdmin";
 const app = express();
 const PORT = 8000;
 const MONGO_URI = process.env.MONGO_URI as string;
@@ -128,6 +128,68 @@ app.delete(
     comment.deleteOne();
     await article.save();
     res.json(article);
+  },
+);
+
+// Create a new article
+app.post(
+  "/api/articles",
+  verifyAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const { name, title, content } = req.body;
+
+    if (!name || !title || !Array.isArray(content)) {
+      return res
+        .status(400)
+        .json({ error: "name, title, and content (array) are required" });
+    }
+
+    const existing = await Article.findOne({ name });
+    if (existing) {
+      return res
+        .status(409)
+        .json({ error: "An article with this name already exists" });
+    }
+
+    const article = new Article({ name, title, content });
+    await article.save();
+    res.status(201).json(article);
+  },
+);
+
+// Update an existing article
+app.put(
+  "/api/articles/:name",
+  verifyAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const { title, content } = req.body;
+
+    const article = await Article.findOne({ name: req.params.name });
+    if (!article) {
+      return res.status(404).json({ error: "Article not found" });
+    }
+
+    if (title) article.title = title;
+    if (Array.isArray(content)) article.content = content;
+
+    await article.save();
+    res.json(article);
+  },
+);
+
+// Delete an article
+app.delete(
+  "/api/articles/:name",
+  verifyAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const article = await Article.findOneAndDelete({ name: req.params.name });
+    if (!article) {
+      return res.status(404).json({ error: "Article not found" });
+    }
+    res.json({ message: "Article deleted" });
   },
 );
 
