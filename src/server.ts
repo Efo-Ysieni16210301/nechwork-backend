@@ -12,6 +12,7 @@ import { requireAdmin } from "./middleware/requireAdmin";
 import { defaultProducts } from "./catalog";
 import Category from "./models/Category";
 import { categorySlug, defaultCategories } from "./categories";
+import GalleryImage from "./models/GalleryImage";
 const app = express();
 const PORT = Number(process.env.PORT || 8000);
 const MONGO_URI = process.env.MONGO_URI;
@@ -356,6 +357,26 @@ app.get("/api/articles/:name", async (req, res) => {
   res.json(article);
 });
 
+app.get("/api/gallery", async (_req, res) => {
+  const images = await GalleryImage.find().sort({ createdAt: -1 }).lean();
+  res.json(images);
+});
+
+app.post("/api/gallery", verifyAuth, requireAdmin, async (req: AuthedRequest, res) => {
+  const { caption, image } = req.body as { caption?: unknown; image?: unknown };
+  if (typeof caption !== "string" || !caption.trim() || typeof image !== "string" || !/^https?:\/\/[^\s]+$/i.test(image.trim())) {
+    return res.status(400).json({ error: "caption and a valid image URL are required" });
+  }
+  const galleryImage = await GalleryImage.create({ caption: caption.trim(), image: image.trim() });
+  res.status(201).json(galleryImage);
+});
+
+app.delete("/api/gallery/:id", verifyAuth, requireAdmin, async (req: AuthedRequest, res) => {
+  const image = await GalleryImage.findByIdAndDelete(req.params.id);
+  if (!image) return res.status(404).json({ error: "Gallery image not found" });
+  res.json({ message: "Gallery image deleted" });
+});
+
 app.post(
   "/api/articles/:name/upvote",
   actionLimiter,
@@ -463,7 +484,7 @@ app.post(
   verifyAuth,
   requireAdmin,
   async (req: AuthedRequest, res) => {
-    const { name, title, content } = req.body;
+    const { name, title, content, image } = req.body;
 
     if (!name || !title || !Array.isArray(content)) {
       return res
@@ -478,7 +499,7 @@ app.post(
         .json({ error: "An article with this name already exists" });
     }
 
-    const article = new Article({ name, title, content });
+    const article = new Article({ name, title, content, ...(typeof image === "string" && image.trim() ? { image: image.trim() } : {}) });
     await article.save();
     res.status(201).json(article);
   },
@@ -490,7 +511,7 @@ app.put(
   verifyAuth,
   requireAdmin,
   async (req: AuthedRequest, res) => {
-    const { title, content } = req.body;
+    const { title, content, image } = req.body;
 
     const article = await Article.findOne({ name: req.params.name });
     if (!article) {
@@ -499,6 +520,7 @@ app.put(
 
     if (title) article.title = title;
     if (Array.isArray(content)) article.content = content;
+    if (typeof image === "string" && image.trim()) article.image = image.trim();
 
     await article.save();
     res.json(article);

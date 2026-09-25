@@ -11,6 +11,7 @@ export interface IArticle extends Document {
   name: string;
   title: string;
   content: string[];
+  image?: string;
   upvotes: number;
   comments: Types.DocumentArray<Comment>;
 }
@@ -25,6 +26,7 @@ const ArticleSchema = new Schema<IArticle>({
   name: { type: String, required: true, unique: true },
   title: { type: String, required: true },
   content: { type: [String], required: true },
+  image: { type: String, trim: true },
   upvotes: { type: Number, default: 0 },
   comments: { type: [CommentSchema], default: [] },
 });
