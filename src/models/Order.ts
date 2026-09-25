@@ -25,6 +25,7 @@ export type OrderStatus = (typeof ORDER_STATUSES)[number];
 export interface IOrder extends Document {
   userId: string;
   email: string;
+  phoneNumber: string;
   items: Types.DocumentArray<OrderItem>;
   shipping: {
     firstName: string;
@@ -54,6 +55,7 @@ const OrderSchema = new Schema<IOrder>(
   {
     userId: { type: String, required: true, index: true },
     email: { type: String, required: true, trim: true },
+    phoneNumber: { type: String, required: true, trim: true },
     items: { type: [OrderItemSchema], required: true, validate: (value: OrderItem[]) => value.length > 0 },
     shipping: {
       firstName: { type: String, required: true, trim: true },

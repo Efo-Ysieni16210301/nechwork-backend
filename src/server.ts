@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 import Article from "./models/Article";
 import Product from "./models/Product";
 import Order, { ORDER_STATUSES, PAYMENT_METHODS } from "./models/Order";
+import UserProfile from "./models/UserProfile";
 import { verifyAuth, AuthedRequest } from "./middleware/verifyAuth";
 import { actionLimiter } from "./middleware/rateLimiter";
 import { requireAdmin } from "./middleware/requireAdmin";
@@ -25,6 +26,65 @@ app.use(express.json());
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
 });
+
+app.get("/api/profile", verifyAuth, async (req: AuthedRequest, res) => {
+  const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
+  res.json(profile || null);
+});
+
+app.put("/api/profile", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  const { phoneNumber } = req.body as { phoneNumber?: unknown };
+  if (
+    typeof phoneNumber !== "string" ||
+    !/^\+[1-9]\d{7,14}$/.test(phoneNumber.trim())
+  ) {
+    return res.status(400).json({
+      error: "Enter a valid international phone number, for example +251912345678",
+    });
+  }
+
+  const profile = await UserProfile.findOneAndUpdate(
+    { uid: req.user!.uid },
+    {
+      uid: req.user!.uid,
+      email: req.user!.email || "",
+      phoneNumber: phoneNumber.trim(),
+      phoneVerified: false,
+    },
+    { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+  );
+  res.json(profile);
+});
+
+app.get(
+  "/api/admin/profiles",
+  verifyAuth,
+  requireAdmin,
+  async (_req: AuthedRequest, res) => {
+    const profiles = await UserProfile.find().sort({ updatedAt: -1 }).lean();
+    res.json(profiles);
+  },
+);
+
+app.patch(
+  "/api/admin/profiles/:uid/phone-status",
+  actionLimiter,
+  verifyAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const { verified } = req.body as { verified?: unknown };
+    if (typeof verified !== "boolean") {
+      return res.status(400).json({ error: "verified must be a boolean" });
+    }
+    const profile = await UserProfile.findOneAndUpdate(
+      { uid: req.params.uid },
+      { phoneVerified: verified },
+      { new: true },
+    );
+    if (!profile) return res.status(404).json({ error: "Customer profile not found" });
+    res.json(profile);
+  },
+);
 
 app.get("/api/products", async (req, res) => {
   const category = typeof req.query.category === "string" ? req.query.category : undefined;
@@ -132,8 +192,11 @@ app.delete(
 );
 
 app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
-  if (!req.user?.email_verified || !req.user.phone_number) {
-    return res.status(403).json({ error: "Email and phone verification are required before ordering" });
+  const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
+  if (!req.user?.email_verified || !profile?.phoneNumber || !profile.phoneVerified) {
+    return res.status(403).json({
+      error: "Verified email and admin-approved phone number are required before ordering",
+    });
   }
   const { items, shipping, paymentMethod, transactionId, paymentProofUrl } = req.body as {
     items?: Array<{ productId?: unknown; quantity?: unknown }>;
@@ -185,6 +248,7 @@ app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, re
   const order = await Order.create({
     userId: req.user!.uid,
     email: req.user!.email,
+    phoneNumber: profile.phoneNumber,
     items: orderItems,
     shipping,
     subtotal: Math.round(subtotal * 100) / 100,
