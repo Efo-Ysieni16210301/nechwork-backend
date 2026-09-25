@@ -2,6 +2,7 @@ import "dotenv/config";
 import mongoose from "mongoose";
 import Article from "./models/Article";
 import Product from "./models/Product";
+import { defaultProducts } from "./catalog";
 
 const articles = [
   {
@@ -36,23 +37,12 @@ const articles = [
   },
 ];
 
-const products = [
-  ["yirgacheffe", "Yirgacheffe single origin", "Coffee", "Bright citrus, jasmine and a honeyed finish.", 18, "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=900&q=85", "Bestseller"],
-  ["house-blend", "House espresso blend", "Coffee", "A balanced, chocolatey daily cup with a silky body.", 16, "https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&w=900&q=85"],
-  ["mountain-tea", "Mountain breakfast tea", "Tea", "A fragrant black tea blend for slow mornings.", 14, "https://images.unsplash.com/photo-1594631252845-29fc4cc8cde9?auto=format&fit=crop&w=900&q=85", "New"],
-  ["chai-spice", "Cardamom chai spice", "Tea", "Whole spices for a warm, aromatic cup at home.", 12, "https://images.unsplash.com/photo-1544787219-7f47ccb76574?auto=format&fit=crop&w=900&q=85"],
-  ["wildflower-honey", "Wildflower honey", "Pantry", "Raw, small-batch honey with floral Ethiopian notes.", 11, "https://images.unsplash.com/photo-1471943311424-646960669fbc?auto=format&fit=crop&w=900&q=85"],
-  ["sesame-crunch", "Sesame crunch", "Pantry", "Toasted sesame brittle made with local cane sugar.", 9, "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&w=900&q=85"],
-  ["ceramic-mug", "Hand-thrown stoneware mug", "Home & gifts", "A tactile, warm-grey mug made for your everyday ritual.", 28, "https://images.unsplash.com/photo-1514228742587-6b1558fcca3d?auto=format&fit=crop&w=900&q=85"],
-  ["morning-box", "The slow morning box", "Home & gifts", "Coffee, honey and a mug, thoughtfully packed for gifting.", 52, "https://images.unsplash.com/photo-1547592180-85f173990554?auto=format&fit=crop&w=900&q=85", "Gift pick"],
-].map(([id, name, category, description, price, image, badge]) => ({ id, name, category, description, price, image, ...(badge ? { badge } : {}) }));
-
 async function seed() {
   await mongoose.connect(process.env.MONGO_URI as string);
   await Article.deleteMany({});
   await Article.insertMany(articles);
   await Product.deleteMany({});
-  await Product.insertMany(products);
+  await Product.insertMany(defaultProducts);
   console.log("Seeded articles and products!");
   await mongoose.disconnect();
 }

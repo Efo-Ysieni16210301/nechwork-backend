@@ -9,6 +9,7 @@ import UserProfile from "./models/UserProfile";
 import { verifyAuth, AuthedRequest } from "./middleware/verifyAuth";
 import { actionLimiter } from "./middleware/rateLimiter";
 import { requireAdmin } from "./middleware/requireAdmin";
+import { defaultProducts } from "./catalog";
 const app = express();
 const PORT = Number(process.env.PORT || 8000);
 const MONGO_URI = process.env.MONGO_URI;
@@ -485,6 +486,17 @@ mongoose
   .connect(MONGO_URI)
   .then(() => {
     console.log("Connected to MongoDB");
+    return Product.bulkWrite(
+      defaultProducts.map((product) => ({
+        updateOne: {
+          filter: { id: product.id },
+          update: { $setOnInsert: product },
+          upsert: true,
+        },
+      })),
+    );
+  })
+  .then(() => {
     app.listen(PORT, () => {
       console.log(`Server is listening on port ${PORT}`);
     });
