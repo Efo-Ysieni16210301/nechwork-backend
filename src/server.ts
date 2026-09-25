@@ -193,9 +193,11 @@ app.delete(
 
 app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
   const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
-  if (!req.user?.email_verified || !profile?.phoneNumber || !profile.phoneVerified) {
+  const emailVerified = req.user?.email_verified === true;
+  const phoneVerified = profile?.phoneVerified === true;
+  if (!emailVerified && !phoneVerified) {
     return res.status(403).json({
-      error: "Verified email and admin-approved phone number are required before ordering",
+      error: "Verify your email or get your phone number approved before ordering",
     });
   }
   const { items, shipping, paymentMethod, transactionId, paymentProofUrl } = req.body as {
@@ -248,7 +250,7 @@ app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, re
   const order = await Order.create({
     userId: req.user!.uid,
     email: req.user!.email,
-    phoneNumber: profile.phoneNumber,
+    phoneNumber: profile?.phoneNumber || undefined,
     items: orderItems,
     shipping,
     subtotal: Math.round(subtotal * 100) / 100,
