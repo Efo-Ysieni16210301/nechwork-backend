@@ -132,6 +132,9 @@ app.delete(
 );
 
 app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  if (!req.user?.email_verified || !req.user.phone_number) {
+    return res.status(403).json({ error: "Email and phone verification are required before ordering" });
+  }
   const { items, shipping, paymentMethod, transactionId, paymentProofUrl } = req.body as {
     items?: Array<{ productId?: unknown; quantity?: unknown }>;
     shipping?: Record<string, unknown>;
