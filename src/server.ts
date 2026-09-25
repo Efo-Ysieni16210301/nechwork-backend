@@ -10,6 +10,8 @@ import { verifyAuth, AuthedRequest } from "./middleware/verifyAuth";
 import { actionLimiter } from "./middleware/rateLimiter";
 import { requireAdmin } from "./middleware/requireAdmin";
 import { defaultProducts } from "./catalog";
+import Category from "./models/Category";
+import { categorySlug, defaultCategories } from "./categories";
 const app = express();
 const PORT = Number(process.env.PORT || 8000);
 const MONGO_URI = process.env.MONGO_URI;
@@ -102,6 +104,31 @@ app.get("/api/products", async (req, res) => {
   const filter = category && category !== "All" ? { active: true, category } : { active: true };
   const products = await Product.find(filter).sort({ createdAt: -1 }).lean();
   res.json(products);
+});
+
+app.get("/api/categories", async (_req, res) => {
+  const categories = await Category.find({ active: true }).sort({ sortOrder: 1, name: 1 }).lean();
+  res.json(categories);
+});
+
+app.post("/api/categories", actionLimiter, verifyAuth, requireAdmin, async (req: AuthedRequest, res) => {
+  const { name } = req.body as { name?: unknown };
+  if (typeof name !== "string" || !name.trim()) return res.status(400).json({ error: "Category name is required" });
+  const category = await Category.create({ name: name.trim(), slug: categorySlug(name), sortOrder: 0 });
+  res.status(201).json(category);
+});
+
+app.put("/api/categories/:slug", actionLimiter, verifyAuth, requireAdmin, async (req: AuthedRequest, res) => {
+  const { name, active } = req.body as { name?: unknown; active?: unknown };
+  const update: { name?: string; slug?: string; active?: boolean } = {};
+  if (typeof name === "string" && name.trim()) {
+    update.name = name.trim();
+    update.slug = categorySlug(name);
+  }
+  if (typeof active === "boolean") update.active = active;
+  const category = await Category.findOneAndUpdate({ slug: req.params.slug }, update, { new: true, runValidators: true });
+  if (!category) return res.status(404).json({ error: "Category not found" });
+  res.json(category);
 });
 
 app.get("/api/products/:id", async (req, res) => {
@@ -501,6 +528,17 @@ mongoose
         updateOne: {
           filter: { id: product.id },
           update: { $setOnInsert: product },
+          upsert: true,
+        },
+      })),
+    );
+  })
+  .then(() => {
+    return Category.bulkWrite(
+      defaultCategories.map((name, index) => ({
+        updateOne: {
+          filter: { slug: categorySlug(name) },
+          update: { $setOnInsert: { name, slug: categorySlug(name), sortOrder: index } },
           upsert: true,
         },
       })),
