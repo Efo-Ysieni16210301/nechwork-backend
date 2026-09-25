@@ -34,13 +34,22 @@ app.get("/api/profile", verifyAuth, async (req: AuthedRequest, res) => {
 });
 
 app.put("/api/profile", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
-  const { phoneNumber } = req.body as { phoneNumber?: unknown };
+  const { firstName, lastName, phoneNumber } = req.body as {
+    firstName?: unknown;
+    lastName?: unknown;
+    phoneNumber?: unknown;
+  };
   if (
-    typeof phoneNumber !== "string" ||
-    !/^\+[1-9]\d{7,14}$/.test(phoneNumber.trim())
+    typeof firstName !== "string" ||
+    !firstName.trim() ||
+    typeof lastName !== "string" ||
+    !lastName.trim() ||
+    (phoneNumber !== undefined &&
+      (typeof phoneNumber !== "string" ||
+        !/^\+[1-9]\d{7,14}$/.test(phoneNumber.trim())))
   ) {
     return res.status(400).json({
-      error: "Enter a valid international phone number, for example +251912345678",
+      error: "First name and last name are required. Phone numbers must use international format, for example +251912345678.",
     });
   }
 
@@ -49,7 +58,9 @@ app.put("/api/profile", actionLimiter, verifyAuth, async (req: AuthedRequest, re
     {
       uid: req.user!.uid,
       email: req.user!.email || "",
-      phoneNumber: phoneNumber.trim(),
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      ...(phoneNumber === undefined ? {} : { phoneNumber: phoneNumber.trim() }),
       phoneVerified: false,
     },
     { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },

@@ -4,7 +4,9 @@ import mongoose from "mongoose";
 export interface IUserProfile extends Document {
   uid: string;
   email: string;
-  phoneNumber: string;
+  firstName: string;
+  lastName: string;
+  phoneNumber?: string;
   phoneVerified: boolean;
 }
 
@@ -12,7 +14,9 @@ const UserProfileSchema = new Schema<IUserProfile>(
   {
     uid: { type: String, required: true, unique: true, index: true },
     email: { type: String, required: true, trim: true, lowercase: true },
-    phoneNumber: { type: String, required: true, trim: true },
+    firstName: { type: String, required: true, trim: true, default: "Customer" },
+    lastName: { type: String, required: true, trim: true, default: "" },
+    phoneNumber: { type: String, trim: true },
     phoneVerified: { type: Boolean, default: false },
   },
   { timestamps: true },
