@@ -8,6 +8,9 @@ export interface IUserProfile extends Document {
   lastName: string;
   phoneNumber: string;
   phoneVerified: boolean;
+  telegramUserId?: string;
+  telegramUsername?: string;
+  telegramVerified: boolean;
 }
 
 const UserProfileSchema = new Schema<IUserProfile>(
@@ -18,6 +21,9 @@ const UserProfileSchema = new Schema<IUserProfile>(
     lastName: { type: String, required: true, trim: true, default: "" },
     phoneNumber: { type: String, required: true, trim: true },
     phoneVerified: { type: Boolean, default: false },
+    telegramUserId: { type: String, sparse: true, index: true },
+    telegramUsername: { type: String, trim: true },
+    telegramVerified: { type: Boolean, default: false },
   },
   { timestamps: true },
 );

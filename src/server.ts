@@ -13,6 +13,8 @@ import { defaultProducts } from "./catalog";
 import Category from "./models/Category";
 import { categorySlug, defaultCategories } from "./categories";
 import GalleryImage from "./models/GalleryImage";
+import crypto from "node:crypto";
+import { adminAuth } from "./firebaseAdmin";
 const app = express();
 const PORT = Number(process.env.PORT || 8000);
 const MONGO_URI = process.env.MONGO_URI;
@@ -29,6 +31,40 @@ app.use(express.json());
 
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+app.post("/api/auth/telegram", actionLimiter, async (req, res) => {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return res.status(503).json({ error: "Telegram sign-in is not configured." });
+  const data = req.body as Record<string, unknown>;
+  const receivedHash = typeof data.hash === "string" ? data.hash : "";
+  const authDate = typeof data.auth_date === "string" ? Number(data.auth_date) : 0;
+  const userId = typeof data.id === "number" || typeof data.id === "string" ? String(data.id) : "";
+  if (!receivedHash || !authDate || !userId || Math.abs(Date.now() / 1000 - authDate) > 86400) {
+    return res.status(401).json({ error: "Telegram login data is missing or expired." });
+  }
+  const checkString = Object.entries(data)
+    .filter(([key, value]) => key !== "hash" && value !== undefined && value !== null)
+    .sort(([first], [second]) => first.localeCompare(second))
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join("\n");
+  const secretKey = crypto.createHash("sha256").update(botToken).digest();
+  const expectedHash = crypto.createHmac("sha256", secretKey).update(checkString).digest("hex");
+  if (receivedHash.length !== expectedHash.length || !crypto.timingSafeEqual(Buffer.from(expectedHash), Buffer.from(receivedHash))) {
+    return res.status(401).json({ error: "Telegram login could not be verified." });
+  }
+  const firstName = typeof data.first_name === "string" ? data.first_name : "Telegram";
+  const lastName = typeof data.last_name === "string" ? data.last_name : "";
+  const username = typeof data.username === "string" ? data.username : "";
+  const uid = `telegram:${userId}`;
+  const email = `${uid.replace(/[^a-zA-Z0-9]/g, "-")}@telegram.local`;
+  const profile = await UserProfile.findOneAndUpdate(
+    { uid },
+    { uid, email, firstName, lastName, phoneNumber: "", telegramUserId: userId, telegramUsername: username, telegramVerified: true },
+    { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true },
+  );
+  const customToken = await adminAuth.createCustomToken(uid, { telegram: true });
+  res.json({ customToken, profile });
 });
 
 app.get("/api/profile", verifyAuth, async (req: AuthedRequest, res) => {
