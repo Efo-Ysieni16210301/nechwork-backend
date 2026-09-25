@@ -6,7 +6,7 @@ export interface IUserProfile extends Document {
   email: string;
   firstName: string;
   lastName: string;
-  phoneNumber?: string;
+  phoneNumber: string;
   phoneVerified: boolean;
 }
 
@@ -16,7 +16,7 @@ const UserProfileSchema = new Schema<IUserProfile>(
     email: { type: String, required: true, trim: true, lowercase: true },
     firstName: { type: String, required: true, trim: true, default: "Customer" },
     lastName: { type: String, required: true, trim: true, default: "" },
-    phoneNumber: { type: String, trim: true },
+    phoneNumber: { type: String, required: true, trim: true },
     phoneVerified: { type: Boolean, default: false },
   },
   { timestamps: true },

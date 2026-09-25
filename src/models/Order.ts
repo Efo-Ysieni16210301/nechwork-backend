@@ -60,6 +60,7 @@ const OrderSchema = new Schema<IOrder>(
     shipping: {
       firstName: { type: String, required: true, trim: true },
       lastName: { type: String, required: true, trim: true },
+      phoneNumber: { type: String, required: true, trim: true },
       address: { type: String, required: true, trim: true },
       city: { type: String, required: true, trim: true },
       postalCode: { type: String, required: true, trim: true },

@@ -44,9 +44,8 @@ app.put("/api/profile", actionLimiter, verifyAuth, async (req: AuthedRequest, re
     !firstName.trim() ||
     typeof lastName !== "string" ||
     !lastName.trim() ||
-    (phoneNumber !== undefined &&
-      (typeof phoneNumber !== "string" ||
-        !/^\+[1-9]\d{7,14}$/.test(phoneNumber.trim())))
+    typeof phoneNumber !== "string" ||
+    !/^\+[1-9]\d{7,14}$/.test(phoneNumber.trim())
   ) {
     return res.status(400).json({
       error: "First name and last name are required. Phone numbers must use international format, for example +251912345678.",
@@ -60,7 +59,7 @@ app.put("/api/profile", actionLimiter, verifyAuth, async (req: AuthedRequest, re
       email: req.user!.email || "",
       firstName: firstName.trim(),
       lastName: lastName.trim(),
-      ...(phoneNumber === undefined ? {} : { phoneNumber: phoneNumber.trim() }),
+      phoneNumber: phoneNumber.trim(),
       phoneVerified: false,
     },
     { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
@@ -243,7 +242,7 @@ app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, re
     item.quantity > 0 &&
     item.quantity <= 99,
   );
-  const requiredShipping = ["firstName", "lastName", "address", "city", "postalCode"];
+  const requiredShipping = ["firstName", "lastName", "phoneNumber", "address", "city", "postalCode"];
   if (!validItems || requiredShipping.some((field) => typeof shipping[field] !== "string" || !shipping[field])) {
     return res.status(400).json({ error: "Invalid order items or shipping details" });
   }
