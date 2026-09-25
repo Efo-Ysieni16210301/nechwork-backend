@@ -33,15 +33,14 @@ app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-app.post("/api/auth/telegram", actionLimiter, async (req, res) => {
+const createTelegramToken = async (data: Record<string, unknown>) => {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  if (!botToken) return res.status(503).json({ error: "Telegram sign-in is not configured." });
-  const data = req.body as Record<string, unknown>;
+  if (!botToken) throw new Error("Telegram sign-in is not configured.");
   const receivedHash = typeof data.hash === "string" ? data.hash : "";
   const authDate = typeof data.auth_date === "string" ? Number(data.auth_date) : 0;
   const userId = typeof data.id === "number" || typeof data.id === "string" ? String(data.id) : "";
   if (!receivedHash || !authDate || !userId || Math.abs(Date.now() / 1000 - authDate) > 86400) {
-    return res.status(401).json({ error: "Telegram login data is missing or expired." });
+    throw new Error("Telegram login data is missing or expired.");
   }
   const checkString = Object.entries(data)
     .filter(([key, value]) => key !== "hash" && value !== undefined && value !== null)
@@ -51,7 +50,7 @@ app.post("/api/auth/telegram", actionLimiter, async (req, res) => {
   const secretKey = crypto.createHash("sha256").update(botToken).digest();
   const expectedHash = crypto.createHmac("sha256", secretKey).update(checkString).digest("hex");
   if (receivedHash.length !== expectedHash.length || !crypto.timingSafeEqual(Buffer.from(expectedHash), Buffer.from(receivedHash))) {
-    return res.status(401).json({ error: "Telegram login could not be verified." });
+    throw new Error("Telegram login could not be verified.");
   }
   const firstName = typeof data.first_name === "string" ? data.first_name : "Telegram";
   const lastName = typeof data.last_name === "string" ? data.last_name : "";
@@ -64,7 +63,28 @@ app.post("/api/auth/telegram", actionLimiter, async (req, res) => {
     { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true },
   );
   const customToken = await adminAuth.createCustomToken(uid, { telegram: true });
-  res.json({ customToken, profile });
+  return { customToken, profile };
+};
+
+app.post("/api/auth/telegram", actionLimiter, async (req, res) => {
+  try {
+    res.json(await createTelegramToken(req.body as Record<string, unknown>));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Telegram sign-in failed.";
+    res.status(message.includes("configured") ? 503 : 401).json({ error: message });
+  }
+});
+
+app.get("/api/auth/telegram", actionLimiter, async (req, res) => {
+  const frontendUrl = process.env.FRONTEND_URL;
+  if (!frontendUrl) return res.status(503).send("Telegram sign-in redirect is not configured.");
+  try {
+    const result = await createTelegramToken(req.query as Record<string, unknown>);
+    res.redirect(`${frontendUrl.replace(/\/$/, "")}/login#telegram_token=${encodeURIComponent(result.customToken)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Telegram sign-in failed.";
+    res.status(message.includes("configured") ? 503 : 401).send(message);
+  }
 });
 
 app.get("/api/profile", verifyAuth, async (req: AuthedRequest, res) => {
