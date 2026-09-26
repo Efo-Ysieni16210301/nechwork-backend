@@ -13,8 +13,6 @@ import { defaultProducts } from "./catalog";
 import Category from "./models/Category";
 import { categorySlug, defaultCategories } from "./categories";
 import GalleryImage from "./models/GalleryImage";
-import crypto from "node:crypto";
-import { adminAuth } from "./firebaseAdmin";
 const app = express();
 const PORT = Number(process.env.PORT || 8000);
 const MONGO_URI = process.env.MONGO_URI;
@@ -31,60 +29,6 @@ app.use(express.json());
 
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
-});
-
-const createTelegramToken = async (data: Record<string, unknown>) => {
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  if (!botToken) throw new Error("Telegram sign-in is not configured.");
-  const receivedHash = typeof data.hash === "string" ? data.hash : "";
-  const authDate = typeof data.auth_date === "string" ? Number(data.auth_date) : 0;
-  const userId = typeof data.id === "number" || typeof data.id === "string" ? String(data.id) : "";
-  if (!receivedHash || !authDate || !userId || Math.abs(Date.now() / 1000 - authDate) > 86400) {
-    throw new Error("Telegram login data is missing or expired.");
-  }
-  const checkString = Object.entries(data)
-    .filter(([key, value]) => key !== "hash" && value !== undefined && value !== null)
-    .sort(([first], [second]) => first.localeCompare(second))
-    .map(([key, value]) => `${key}=${String(value)}`)
-    .join("\n");
-  const secretKey = crypto.createHash("sha256").update(botToken).digest();
-  const expectedHash = crypto.createHmac("sha256", secretKey).update(checkString).digest("hex");
-  if (receivedHash.length !== expectedHash.length || !crypto.timingSafeEqual(Buffer.from(expectedHash), Buffer.from(receivedHash))) {
-    throw new Error("Telegram login could not be verified.");
-  }
-  const firstName = typeof data.first_name === "string" ? data.first_name : "Telegram";
-  const lastName = typeof data.last_name === "string" ? data.last_name : "";
-  const username = typeof data.username === "string" ? data.username : "";
-  const uid = `telegram:${userId}`;
-  const email = `${uid.replace(/[^a-zA-Z0-9]/g, "-")}@telegram.local`;
-  const profile = await UserProfile.findOneAndUpdate(
-    { uid },
-    { uid, email, firstName, lastName, phoneNumber: "", telegramUserId: userId, telegramUsername: username, telegramVerified: true },
-    { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true },
-  );
-  const customToken = await adminAuth.createCustomToken(uid, { telegram: true });
-  return { customToken, profile };
-};
-
-app.post("/api/auth/telegram", actionLimiter, async (req, res) => {
-  try {
-    res.json(await createTelegramToken(req.body as Record<string, unknown>));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Telegram sign-in failed.";
-    res.status(message.includes("configured") ? 503 : 401).json({ error: message });
-  }
-});
-
-app.get("/api/auth/telegram", actionLimiter, async (req, res) => {
-  const frontendUrl = process.env.FRONTEND_URL;
-  if (!frontendUrl) return res.status(503).send("Telegram sign-in redirect is not configured.");
-  try {
-    const result = await createTelegramToken(req.query as Record<string, unknown>);
-    res.redirect(`${frontendUrl.replace(/\/$/, "")}/login#telegram_token=${encodeURIComponent(result.customToken)}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Telegram sign-in failed.";
-    res.status(message.includes("configured") ? 503 : 401).send(message);
-  }
 });
 
 app.get("/api/profile", verifyAuth, async (req: AuthedRequest, res) => {
@@ -119,7 +63,6 @@ app.put("/api/profile", actionLimiter, verifyAuth, async (req: AuthedRequest, re
       firstName: firstName.trim(),
       lastName: lastName.trim(),
       phoneNumber: phoneNumber.trim(),
-      phoneVerified: false,
     },
     { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
   );
@@ -133,26 +76,6 @@ app.get(
   async (_req: AuthedRequest, res) => {
     const profiles = await UserProfile.find().sort({ updatedAt: -1 }).lean();
     res.json(profiles);
-  },
-);
-
-app.patch(
-  "/api/admin/profiles/:uid/phone-status",
-  actionLimiter,
-  verifyAuth,
-  requireAdmin,
-  async (req: AuthedRequest, res) => {
-    const { verified } = req.body as { verified?: unknown };
-    if (typeof verified !== "boolean") {
-      return res.status(400).json({ error: "verified must be a boolean" });
-    }
-    const profile = await UserProfile.findOneAndUpdate(
-      { uid: req.params.uid },
-      { phoneVerified: verified },
-      { new: true },
-    );
-    if (!profile) return res.status(404).json({ error: "Customer profile not found" });
-    res.json(profile);
   },
 );
 
@@ -289,10 +212,9 @@ app.delete(
 app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
   const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
   const emailVerified = req.user?.email_verified === true;
-  const phoneVerified = profile?.phoneVerified === true;
-  if (!emailVerified && !phoneVerified) {
+  if (!emailVerified) {
     return res.status(403).json({
-      error: "Verify your email or get your phone number approved before ordering",
+      error: "Verify your email before placing an order.",
     });
   }
   const { items, shipping, paymentMethod, transactionId, paymentProofUrl } = req.body as {

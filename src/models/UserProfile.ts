@@ -6,11 +6,7 @@ export interface IUserProfile extends Document {
   email: string;
   firstName: string;
   lastName: string;
-  phoneNumber?: string;
-  phoneVerified: boolean;
-  telegramUserId?: string;
-  telegramUsername?: string;
-  telegramVerified: boolean;
+  phoneNumber: string;
 }
 
 const UserProfileSchema = new Schema<IUserProfile>(
@@ -19,11 +15,7 @@ const UserProfileSchema = new Schema<IUserProfile>(
     email: { type: String, required: true, trim: true, lowercase: true },
     firstName: { type: String, required: true, trim: true, default: "Customer" },
     lastName: { type: String, required: true, trim: true, default: "" },
-    phoneNumber: { type: String, trim: true, default: "" },
-    phoneVerified: { type: Boolean, default: false },
-    telegramUserId: { type: String, sparse: true, index: true },
-    telegramUsername: { type: String, trim: true },
-    telegramVerified: { type: Boolean, default: false },
+    phoneNumber: { type: String, required: true, trim: true },
   },
   { timestamps: true },
 );
