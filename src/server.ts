@@ -66,14 +66,17 @@ const verifyChapaOrder = async (order: InstanceType<typeof Order>) => {
   return { paid: true, paymentStatus: "paid" };
 };
 
-app.post("/api/newsletter", actionLimiter, async (req, res) => {
-  const { email, consent } = req.body as { email?: unknown; consent?: unknown };
-  if (
-    typeof email !== "string" ||
-    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ||
-    consent !== true
-  ) {
-    return res.status(400).json({ error: "A valid email and newsletter consent are required." });
+app.post("/api/newsletter", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  if (req.user?.email_verified !== true) {
+    return res.status(403).json({ error: "Verify your account email before subscribing." });
+  }
+  const email = req.user.email;
+  const { consent } = req.body as { consent?: unknown };
+  if (typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    return res.status(400).json({ error: "Your signed-in account must have a valid email address." });
+  }
+  if (consent !== true) {
+    return res.status(400).json({ error: "Newsletter consent is required." });
   }
 
   try {
