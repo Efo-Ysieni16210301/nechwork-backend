@@ -14,6 +14,7 @@ import Category from "./models/Category";
 import { categorySlug, defaultCategories } from "./categories";
 import GalleryImage from "./models/GalleryImage";
 import NewsletterSubscriber from "./models/NewsletterSubscriber";
+import { randomUUID } from "node:crypto";
 const app = express();
 const PORT = Number(process.env.PORT || 8000);
 const MONGO_URI = process.env.MONGO_URI;
@@ -31,6 +32,47 @@ app.use(express.json());
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
 });
+
+const verifyChapaOrder = async (order: InstanceType<typeof Order>) => {
+  const secretKey = process.env.CHAPA_SECRET_KEY;
+  if (!secretKey) throw new Error("Chapa payment is not configured.");
+
+  const response = await fetch(
+    `https://api.chapa.co/v1/transaction/verify/${encodeURIComponent(order.transactionId)}`,
+    { headers: { Authorization: `Bearer ${secretKey}` } },
+  );
+  const result = await response.json() as {
+    status?: string;
+    message?: string;
+    data?: { status?: string; tx_ref?: string; amount?: string | number; currency?: string };
+  };
+  if (!response.ok) throw new Error(result.message || "Could not verify payment with Chapa.");
+
+  const transaction = result.data;
+  const expectedAmount = order.amountEtb;
+  const amount = Number(transaction?.amount);
+  const valid =
+    result.status === "success" &&
+    transaction?.status?.toLowerCase() === "success" &&
+    transaction.tx_ref === order.transactionId &&
+    transaction.currency?.toUpperCase() === "ETB" &&
+    expectedAmount !== undefined &&
+    Number.isFinite(amount) &&
+    Math.abs(amount - expectedAmount) < 0.01;
+
+  if (!valid) {
+    return { paid: false, paymentStatus: transaction?.status || result.status || "pending" };
+  }
+
+  if (order.paymentStatus !== "paid") {
+    order.paymentStatus = "paid";
+    if (order.status === "pending" || order.status === "under_review" || order.status === "rejected") {
+      order.status = "confirmed";
+    }
+    await order.save();
+  }
+  return { paid: true, paymentStatus: "paid" };
+};
 
 app.post("/api/newsletter", actionLimiter, async (req, res) => {
   const { email, consent } = req.body as { email?: unknown; consent?: unknown };
@@ -248,6 +290,143 @@ app.delete(
     res.json({ message: "Product archived" });
   },
 );
+
+app.post("/api/payments/chapa/initialize", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  if (req.user?.email_verified !== true) {
+    return res.status(403).json({ error: "Verify your email before placing an order." });
+  }
+
+  const secretKey = process.env.CHAPA_SECRET_KEY;
+  const backendUrl = process.env.BACKEND_URL;
+  const frontendUrl = process.env.FRONTEND_URL;
+  const exchangeRate = Number(process.env.USD_TO_ETB_RATE);
+  if (!secretKey || !backendUrl || !frontendUrl || !Number.isFinite(exchangeRate) || exchangeRate <= 0) {
+    return res.status(503).json({ error: "Chapa checkout is not fully configured on the server." });
+  }
+
+  const { items, shipping } = req.body as {
+    items?: Array<{ productId?: unknown; quantity?: unknown }>;
+    shipping?: Record<string, unknown>;
+  };
+  const validItems = Array.isArray(items) &&
+    items.length > 0 &&
+    items.every((item) =>
+      typeof item.productId === "string" &&
+      typeof item.quantity === "number" &&
+      Number.isInteger(item.quantity) &&
+      item.quantity > 0 &&
+      item.quantity <= 99,
+    );
+  const requiredShipping = ["firstName", "lastName", "phoneNumber", "address", "city", "postalCode"];
+  if (!validItems || !shipping || requiredShipping.some((field) =>
+    typeof shipping[field] !== "string" || !String(shipping[field]).trim(),
+  )) {
+    return res.status(400).json({ error: "Valid order items and complete delivery details are required." });
+  }
+
+  const productIds = items.map((item) => item.productId as string);
+  const products = await Product.find({ id: { $in: productIds }, active: true }).lean();
+  if (products.length !== new Set(productIds).size) {
+    return res.status(400).json({ error: "One or more products are unavailable." });
+  }
+  const orderItems = items.map((item) => {
+    const product = products.find((candidate) => candidate.id === item.productId);
+    return { productId: product!.id, name: product!.name, price: product!.price, quantity: item.quantity as number };
+  });
+  const subtotalUsd = Math.round(orderItems.reduce((total, item) => total + item.price * item.quantity, 0) * 100) / 100;
+  const amountEtb = Math.round(subtotalUsd * exchangeRate * 100) / 100;
+  if (amountEtb <= 0) return res.status(400).json({ error: "The order total must be greater than zero." });
+
+  const txRef = `nech-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
+  const order = await Order.create({
+    userId: req.user!.uid,
+    email: req.user!.email || "",
+    phoneNumber: profile?.phoneNumber || undefined,
+    items: orderItems,
+    shipping,
+    subtotal: subtotalUsd,
+    amountEtb,
+    exchangeRate,
+    currency: "ETB",
+    paymentMethod: "chapa",
+    paymentStatus: "pending",
+    transactionId: txRef,
+    status: "pending",
+  });
+
+  const phone = typeof shipping.phoneNumber === "string" ? shipping.phoneNumber.replace(/\D/g, "") : "";
+  const chapaPhone = phone.startsWith("251") && phone.length === 12 ? `0${phone.slice(3)}` : phone;
+  const payload = {
+    amount: amountEtb.toFixed(2),
+    currency: "ETB",
+    email: req.user!.email || "",
+    first_name: String(shipping.firstName).trim(),
+    last_name: String(shipping.lastName).trim(),
+    tx_ref: txRef,
+    callback_url: `${backendUrl.replace(/\/$/, "")}/api/payments/chapa/webhook`,
+    return_url: `${frontendUrl.replace(/\/$/, "")}/payment/return?tx_ref=${encodeURIComponent(txRef)}`,
+    customization: {
+      title: "Nech Work",
+      description: `Order ${txRef}`,
+    },
+    ...( /^0[79]\d{8}$/.test(chapaPhone) ? { phone_number: chapaPhone } : {}),
+  };
+
+  try {
+    const chapaResponse = await fetch("https://api.chapa.co/v1/transaction/initialize", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const result = await chapaResponse.json() as {
+      status?: string;
+      message?: string;
+      data?: { checkout_url?: string };
+    };
+    if (!chapaResponse.ok || result.status !== "success" || !result.data?.checkout_url) {
+      order.paymentStatus = "failed";
+      order.status = "rejected";
+      await order.save();
+      return res.status(502).json({ error: result.message || "Chapa could not initialize this payment." });
+    }
+    res.status(201).json({ checkoutUrl: result.data.checkout_url, txRef, amountEtb, currency: "ETB" });
+  } catch (error) {
+    res.status(502).json({
+      error: error instanceof Error ? error.message : "Could not connect to Chapa.",
+    });
+  }
+});
+
+app.get("/api/payments/chapa/verify/:txRef", verifyAuth, async (req: AuthedRequest, res) => {
+  const order = await Order.findOne({ transactionId: req.params.txRef, userId: req.user!.uid });
+  if (!order) return res.status(404).json({ error: "Payment order not found." });
+  try {
+    const verification = await verifyChapaOrder(order);
+    res.json({ ...verification, orderId: order._id, txRef: order.transactionId, amountEtb: order.amountEtb });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : "Payment verification failed." });
+  }
+});
+
+app.post("/api/payments/chapa/webhook", actionLimiter, async (req, res) => {
+  const body = req.body as { tx_ref?: unknown; data?: { tx_ref?: unknown } };
+  const txRef = typeof body.tx_ref === "string"
+    ? body.tx_ref
+    : typeof body.data?.tx_ref === "string" ? body.data.tx_ref : "";
+  if (!txRef) return res.status(400).json({ error: "Transaction reference is required." });
+  const order = await Order.findOne({ transactionId: txRef, paymentMethod: "chapa" });
+  if (!order) return res.status(404).json({ error: "Payment order not found." });
+  try {
+    const verification = await verifyChapaOrder(order);
+    res.json({ received: true, paid: verification.paid });
+  } catch {
+    res.status(502).json({ error: "Could not verify the Chapa notification." });
+  }
+});
 
 app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
   const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();

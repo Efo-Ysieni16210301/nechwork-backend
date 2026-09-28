@@ -7,8 +7,10 @@ interface OrderItem {
   quantity: number;
 }
 
-export const PAYMENT_METHODS = ["telebirr", "cbe", "abyssinia", "other", "manual"] as const;
+export const PAYMENT_METHODS = ["chapa", "telebirr", "cbe", "abyssinia", "other", "manual"] as const;
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
+export const PAYMENT_STATUSES = ["pending", "paid", "failed", "manual_review"] as const;
+export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
 export const ORDER_STATUSES = [
   "pending",
@@ -35,9 +37,13 @@ export interface IOrder extends Document {
     postalCode: string;
   };
   subtotal: number;
+  amountEtb?: number;
+  exchangeRate?: number;
+  currency: string;
   paymentMethod: PaymentMethod;
+  paymentStatus: PaymentStatus;
   transactionId: string;
-  paymentProofUrl: string;
+  paymentProofUrl?: string;
   status: OrderStatus;
 }
 
@@ -66,6 +72,9 @@ const OrderSchema = new Schema<IOrder>(
       postalCode: { type: String, required: true, trim: true },
     },
     subtotal: { type: Number, required: true, min: 0 },
+    amountEtb: { type: Number, min: 0 },
+    exchangeRate: { type: Number, min: 0 },
+    currency: { type: String, required: true, default: "USD", uppercase: true, trim: true },
     paymentMethod: {
       type: String,
       enum: PAYMENT_METHODS,
@@ -73,10 +82,15 @@ const OrderSchema = new Schema<IOrder>(
       lowercase: true,
       trim: true,
     },
+    paymentStatus: {
+      type: String,
+      enum: PAYMENT_STATUSES,
+      default: "manual_review",
+      required: true,
+    },
     transactionId: { type: String, required: true, trim: true, minlength: 1, maxlength: 200 },
     paymentProofUrl: {
       type: String,
-      required: true,
       trim: true,
       match: /^https?:\/\/[^\s]+$/i,
     },
