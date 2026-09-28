@@ -15,6 +15,7 @@ import { categorySlug, defaultCategories } from "./categories";
 import GalleryImage from "./models/GalleryImage";
 import NewsletterSubscriber from "./models/NewsletterSubscriber";
 import { randomUUID } from "node:crypto";
+import { Chapa } from "chapa-nodejs";
 const app = express();
 const PORT = Number(process.env.PORT || 8000);
 const MONGO_URI = process.env.MONGO_URI;
@@ -37,17 +38,8 @@ const verifyChapaOrder = async (order: InstanceType<typeof Order>) => {
   const secretKey = process.env.CHAPA_SECRET_KEY;
   if (!secretKey) throw new Error("Chapa payment is not configured.");
 
-  const response = await fetch(
-    `https://api.chapa.co/v1/transaction/verify/${encodeURIComponent(order.transactionId)}`,
-    { headers: { Authorization: `Bearer ${secretKey}` } },
-  );
-  const result = await response.json() as {
-    status?: string;
-    message?: string;
-    data?: { status?: string; tx_ref?: string; amount?: string | number; currency?: string };
-  };
-  if (!response.ok) throw new Error(result.message || "Could not verify payment with Chapa.");
-
+  const chapa = new Chapa({ secretKey });
+  const result = await chapa.verify({ tx_ref: order.transactionId });
   const transaction = result.data;
   const expectedAmount = order.amountEtb;
   const amount = Number(transaction?.amount);
@@ -301,7 +293,15 @@ app.post("/api/payments/chapa/initialize", actionLimiter, verifyAuth, async (req
   const frontendUrl = process.env.FRONTEND_URL;
   const exchangeRate = Number(process.env.USD_TO_ETB_RATE);
   if (!secretKey || !backendUrl || !frontendUrl || !Number.isFinite(exchangeRate) || exchangeRate <= 0) {
-    return res.status(503).json({ error: "Chapa checkout is not fully configured on the server." });
+    const missingConfig = [
+      !secretKey && "CHAPA_SECRET_KEY",
+      !backendUrl && "BACKEND_URL",
+      !frontendUrl && "FRONTEND_URL",
+      (!Number.isFinite(exchangeRate) || exchangeRate <= 0) && "USD_TO_ETB_RATE",
+    ].filter((name): name is string => Boolean(name));
+    return res.status(503).json({
+      error: `Chapa checkout is not fully configured on the server. Missing or invalid settings: ${missingConfig.join(", ")}.`,
+    });
   }
 
   const { items, shipping } = req.body as {
@@ -374,20 +374,9 @@ app.post("/api/payments/chapa/initialize", actionLimiter, verifyAuth, async (req
   };
 
   try {
-    const chapaResponse = await fetch("https://api.chapa.co/v1/transaction/initialize", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${secretKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-    const result = await chapaResponse.json() as {
-      status?: string;
-      message?: string;
-      data?: { checkout_url?: string };
-    };
-    if (!chapaResponse.ok || result.status !== "success" || !result.data?.checkout_url) {
+    const chapa = new Chapa({ secretKey });
+    const result = await chapa.initialize(payload);
+    if (result.status !== "success" || !result.data?.checkout_url) {
       order.paymentStatus = "failed";
       order.status = "rejected";
       await order.save();
