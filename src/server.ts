@@ -13,6 +13,7 @@ import { defaultProducts } from "./catalog";
 import Category from "./models/Category";
 import { categorySlug, defaultCategories } from "./categories";
 import GalleryImage from "./models/GalleryImage";
+import NewsletterSubscriber from "./models/NewsletterSubscriber";
 const app = express();
 const PORT = Number(process.env.PORT || 8000);
 const MONGO_URI = process.env.MONGO_URI;
@@ -30,6 +31,45 @@ app.use(express.json());
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
 });
+
+app.post("/api/newsletter", actionLimiter, async (req, res) => {
+  const { email, consent } = req.body as { email?: unknown; consent?: unknown };
+  if (
+    typeof email !== "string" ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ||
+    consent !== true
+  ) {
+    return res.status(400).json({ error: "A valid email and newsletter consent are required." });
+  }
+
+  try {
+    await NewsletterSubscriber.create({ email: email.trim().toLowerCase() });
+    return res.status(201).json({ message: "You’re subscribed to Nech Work updates." });
+  } catch (error) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === 11000
+    ) {
+      return res.status(200).json({ message: "This email is already subscribed." });
+    }
+    throw error;
+  }
+});
+
+app.get(
+  "/api/admin/newsletter",
+  verifyAuth,
+  requireAdmin,
+  async (_req: AuthedRequest, res) => {
+    const subscribers = await NewsletterSubscriber.find()
+      .sort({ createdAt: -1 })
+      .select("email consentedAt createdAt")
+      .lean();
+    res.json(subscribers);
+  },
+);
 
 app.get("/api/profile", verifyAuth, async (req: AuthedRequest, res) => {
   const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
