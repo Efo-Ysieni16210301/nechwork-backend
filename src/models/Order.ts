@@ -37,6 +37,7 @@ export interface IOrder extends Document {
     postalCode: string;
   };
   subtotal: number;
+  amountPaid?: number;
   amountEtb?: number;
   exchangeRate?: number;
   currency: string;
@@ -72,6 +73,7 @@ const OrderSchema = new Schema<IOrder>(
       postalCode: { type: String, required: true, trim: true },
     },
     subtotal: { type: Number, required: true, min: 0 },
+    amountPaid: { type: Number, min: 0 },
     amountEtb: { type: Number, min: 0 },
     exchangeRate: { type: Number, min: 0 },
     currency: { type: String, required: true, default: "USD", uppercase: true, trim: true },

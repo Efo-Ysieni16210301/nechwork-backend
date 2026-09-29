@@ -4,7 +4,7 @@ import cors from "cors";
 import mongoose from "mongoose";
 import Article from "./models/Article";
 import Product from "./models/Product";
-import Order, { ORDER_STATUSES, PAYMENT_METHODS } from "./models/Order";
+import Order, { ORDER_STATUSES } from "./models/Order";
 import UserProfile from "./models/UserProfile";
 import { verifyAuth, AuthedRequest } from "./middleware/verifyAuth";
 import { actionLimiter } from "./middleware/rateLimiter";
@@ -41,19 +41,28 @@ const verifyChapaOrder = async (order: InstanceType<typeof Order>) => {
   const chapa = new Chapa({ secretKey });
   const result = await chapa.verify({ tx_ref: order.transactionId });
   const transaction = result.data;
-  const expectedAmount = order.amountEtb;
+  const expectedCurrency = order.currency.toUpperCase();
+  const expectedAmount = order.amountPaid ?? (
+    expectedCurrency === "USD" ? order.subtotal : order.amountEtb
+  );
   const amount = Number(transaction?.amount);
   const valid =
     result.status === "success" &&
     transaction?.status?.toLowerCase() === "success" &&
     transaction.tx_ref === order.transactionId &&
-    transaction.currency?.toUpperCase() === "ETB" &&
+    ["USD", "ETB"].includes(expectedCurrency) &&
+    transaction.currency?.toUpperCase() === expectedCurrency &&
     expectedAmount !== undefined &&
     Number.isFinite(amount) &&
     Math.abs(amount - expectedAmount) < 0.01;
 
   if (!valid) {
-    return { paid: false, paymentStatus: transaction?.status || result.status || "pending" };
+    return {
+      paid: false,
+      paymentStatus: transaction?.status || result.status || "pending",
+      amountPaid: expectedAmount,
+      currency: expectedCurrency,
+    };
   }
 
   if (order.paymentStatus !== "paid") {
@@ -63,7 +72,7 @@ const verifyChapaOrder = async (order: InstanceType<typeof Order>) => {
     }
     await order.save();
   }
-  return { paid: true, paymentStatus: "paid" };
+  return { paid: true, paymentStatus: "paid", amountPaid: expectedAmount, currency: expectedCurrency };
 };
 
 app.post("/api/newsletter", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
@@ -307,10 +316,14 @@ app.post("/api/payments/chapa/initialize", actionLimiter, verifyAuth, async (req
     });
   }
 
-  const { items, shipping } = req.body as {
+  const { items, shipping, currency } = req.body as {
     items?: Array<{ productId?: unknown; quantity?: unknown }>;
     shipping?: Record<string, unknown>;
+    currency?: unknown;
   };
+  if (currency !== "USD" && currency !== "ETB") {
+    return res.status(400).json({ error: "Choose USD or ETB as the payment currency." });
+  }
   const validItems = Array.isArray(items) &&
     items.length > 0 &&
     items.every((item) =>
@@ -339,6 +352,7 @@ app.post("/api/payments/chapa/initialize", actionLimiter, verifyAuth, async (req
   const subtotalUsd = Math.round(orderItems.reduce((total, item) => total + item.price * item.quantity, 0) * 100) / 100;
   const amountEtb = Math.round(subtotalUsd * exchangeRate * 100) / 100;
   if (amountEtb <= 0) return res.status(400).json({ error: "The order total must be greater than zero." });
+  const amountPaid = currency === "USD" ? subtotalUsd : amountEtb;
 
   const txRef = `nech-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
@@ -349,9 +363,10 @@ app.post("/api/payments/chapa/initialize", actionLimiter, verifyAuth, async (req
     items: orderItems,
     shipping,
     subtotal: subtotalUsd,
+    amountPaid,
     amountEtb,
     exchangeRate,
-    currency: "ETB",
+    currency,
     paymentMethod: "chapa",
     paymentStatus: "pending",
     transactionId: txRef,
@@ -361,8 +376,8 @@ app.post("/api/payments/chapa/initialize", actionLimiter, verifyAuth, async (req
   const phone = typeof shipping.phoneNumber === "string" ? shipping.phoneNumber.replace(/\D/g, "") : "";
   const chapaPhone = phone.startsWith("251") && phone.length === 12 ? `0${phone.slice(3)}` : phone;
   const payload = {
-    amount: amountEtb.toFixed(2),
-    currency: "ETB",
+    amount: amountPaid.toFixed(2),
+    currency,
     email: req.user!.email || "",
     first_name: String(shipping.firstName).trim(),
     last_name: String(shipping.lastName).trim(),
@@ -385,7 +400,7 @@ app.post("/api/payments/chapa/initialize", actionLimiter, verifyAuth, async (req
       await order.save();
       return res.status(502).json({ error: result.message || "Chapa could not initialize this payment." });
     }
-    res.status(201).json({ checkoutUrl: result.data.checkout_url, txRef, amountEtb, currency: "ETB" });
+    res.status(201).json({ checkoutUrl: result.data.checkout_url, txRef, amountPaid, currency });
   } catch (error) {
     res.status(502).json({
       error: error instanceof Error ? error.message : "Could not connect to Chapa.",
@@ -398,7 +413,7 @@ app.get("/api/payments/chapa/verify/:txRef", verifyAuth, async (req: AuthedReque
   if (!order) return res.status(404).json({ error: "Payment order not found." });
   try {
     const verification = await verifyChapaOrder(order);
-    res.json({ ...verification, orderId: order._id, txRef: order.transactionId, amountEtb: order.amountEtb });
+    res.json({ ...verification, orderId: order._id, txRef: order.transactionId });
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : "Payment verification failed." });
   }
@@ -420,73 +435,8 @@ app.post("/api/payments/chapa/webhook", actionLimiter, async (req, res) => {
   }
 });
 
-app.post("/api/orders", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
-  const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
-  const emailVerified = req.user?.email_verified === true;
-  if (!emailVerified) {
-    return res.status(403).json({
-      error: "Verify your email before placing an order.",
-    });
-  }
-  const { items, shipping, paymentMethod, transactionId, paymentProofUrl } = req.body as {
-    items?: Array<{ productId?: unknown; quantity?: unknown }>;
-    shipping?: Record<string, unknown>;
-    paymentMethod?: unknown;
-    transactionId?: unknown;
-    paymentProofUrl?: unknown;
-  };
-  if (
-    !Array.isArray(items) ||
-    items.length === 0 ||
-    !shipping ||
-    typeof paymentMethod !== "string" ||
-    !PAYMENT_METHODS.includes(paymentMethod.trim().toLowerCase() as (typeof PAYMENT_METHODS)[number]) ||
-    typeof transactionId !== "string" ||
-    !transactionId.trim() ||
-    transactionId.length > 200 ||
-    typeof paymentProofUrl !== "string" ||
-    !/^https?:\/\/[^\s]+$/i.test(paymentProofUrl.trim())
-  ) {
-    return res.status(400).json({
-      error: "items, shipping, payment method, transaction ID, and a valid payment proof URL are required",
-    });
-  }
-  const normalizedPaymentMethod = paymentMethod.trim().toLowerCase() as (typeof PAYMENT_METHODS)[number];
-  const validItems = items.every((item) =>
-    typeof item.productId === "string" &&
-    typeof item.quantity === "number" &&
-    Number.isInteger(item.quantity) &&
-    item.quantity > 0 &&
-    item.quantity <= 99,
-  );
-  const requiredShipping = ["firstName", "lastName", "phoneNumber", "address", "city", "postalCode"];
-  if (!validItems || requiredShipping.some((field) => typeof shipping[field] !== "string" || !shipping[field])) {
-    return res.status(400).json({ error: "Invalid order items or shipping details" });
-  }
-
-  const productIds = items.map((item) => item.productId as string);
-  const products = await Product.find({ id: { $in: productIds }, active: true }).lean();
-  if (products.length !== new Set(productIds).size) {
-    return res.status(400).json({ error: "One or more products are unavailable" });
-  }
-
-  const orderItems = items.map((item) => {
-    const product = products.find((candidate) => candidate.id === item.productId);
-    return { productId: product!.id, name: product!.name, price: product!.price, quantity: item.quantity as number };
-  });
-  const subtotal = orderItems.reduce((total, item) => total + item.price * item.quantity, 0);
-  const order = await Order.create({
-    userId: req.user!.uid,
-    email: req.user!.email,
-    phoneNumber: profile?.phoneNumber || undefined,
-    items: orderItems,
-    shipping,
-    subtotal: Math.round(subtotal * 100) / 100,
-    paymentMethod: normalizedPaymentMethod,
-    transactionId: transactionId.trim(),
-    paymentProofUrl: paymentProofUrl.trim(),
-  });
-  res.status(201).json(order);
+app.post("/api/orders", actionLimiter, verifyAuth, (_req, res) => {
+  res.status(410).json({ error: "Manual transfer checkout is unavailable. Place your order through Chapa." });
 });
 
 app.get("/api/orders", verifyAuth, async (req: AuthedRequest, res) => {
