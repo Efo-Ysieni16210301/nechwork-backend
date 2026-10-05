@@ -3,7 +3,7 @@ import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
 import Article from "./models/Article";
-import Product from "./models/Product";
+import Product, { IProduct } from "./models/Product";
 import Order, { ORDER_STATUSES } from "./models/Order";
 import UserProfile from "./models/UserProfile";
 import { verifyAuth, AuthedRequest } from "./middleware/verifyAuth";
@@ -14,6 +14,10 @@ import Category from "./models/Category";
 import { categorySlug, defaultCategories } from "./categories";
 import GalleryImage from "./models/GalleryImage";
 import NewsletterSubscriber from "./models/NewsletterSubscriber";
+import Seller from "./models/Seller";
+import Conversation from "./models/Conversation";
+import ProductReview from "./models/ProductReview";
+import ProductReaction from "./models/ProductReaction";
 import { randomUUID } from "node:crypto";
 import { Chapa } from "chapa-nodejs";
 const app = express();
@@ -73,6 +77,49 @@ const verifyChapaOrder = async (order: InstanceType<typeof Order>) => {
     await order.save();
   }
   return { paid: true, paymentStatus: "paid", amountPaid: expectedAmount, currency: expectedCurrency };
+};
+
+const asPublicProduct = <T extends { assets?: unknown }>(product: T, seller?: {
+  shopName: string;
+  city: string;
+  address: string;
+  phoneNumber: string;
+}) => {
+  const { assets: _privateAssets, ...publicProduct } = product;
+  return { ...publicProduct, ...(seller ? { seller } : {}) };
+};
+
+const isCloudinaryUrl = (value: unknown): value is string => {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "res.cloudinary.com";
+  } catch {
+    return false;
+  }
+};
+
+const validateSpecifications = (value: unknown): value is { name: string; value: string }[] =>
+  Array.isArray(value) &&
+  value.length <= 30 &&
+  value.every((item) =>
+    item !== null &&
+    typeof item === "object" &&
+    typeof (item as { name?: unknown }).name === "string" &&
+    (item as { name: string }).name.trim().length > 0 &&
+    (item as { name: string }).name.trim().length <= 80 &&
+    typeof (item as { value?: unknown }).value === "string" &&
+    (item as { value: string }).value.trim().length > 0 &&
+    (item as { value: string }).value.trim().length <= 250,
+  );
+
+const findPublicProduct = async (id: string) => {
+  const product = await Product.findOne({ id, active: true }).select("id sellerId sellerListingStatus").lean();
+  if (!product) return null;
+  if (!product.sellerId) return product;
+  if (product.sellerListingStatus !== "approved") return null;
+  const seller = await Seller.exists({ uid: product.sellerId, status: "approved" });
+  return seller ? product : null;
 };
 
 app.post("/api/newsletter", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
@@ -165,11 +212,196 @@ app.get(
   },
 );
 
+app.post("/api/seller/apply", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  const {
+    firstName, lastName, phoneNumber, shopName, description, city, address,
+    bankName, accountHolderName, accountNumber, mobileMoneyNumber,
+  } = req.body as Record<string, unknown>;
+  const requiredText = [firstName, lastName, shopName, description, city, address, bankName, accountHolderName, accountNumber];
+  if (
+    requiredText.some((value) => typeof value !== "string" || !value.trim()) ||
+    typeof phoneNumber !== "string" || !/^\+[1-9]\d{7,14}$/.test(phoneNumber.trim()) ||
+    (mobileMoneyNumber !== undefined && typeof mobileMoneyNumber !== "string")
+  ) {
+    return res.status(400).json({ error: "Complete the shop, contact, and payout details before applying." });
+  }
+  if (
+    (description as string).trim().length > 1000 ||
+    (shopName as string).trim().length > 100 ||
+    (address as string).trim().length > 300 ||
+    (accountNumber as string).trim().length > 100
+  ) {
+    return res.status(400).json({ error: "One or more application fields exceed the allowed length." });
+  }
+  const current = await Seller.findOne({ uid: req.user!.uid });
+  if (current?.status === "approved") {
+    return res.status(409).json({ error: "Your seller account is already approved." });
+  }
+  if (current?.status === "pending") {
+    return res.status(409).json({ error: "Your seller application is already awaiting review." });
+  }
+  const seller = await Seller.findOneAndUpdate(
+    { uid: req.user!.uid },
+    {
+      uid: req.user!.uid,
+      email: req.user!.email || "",
+      firstName: (firstName as string).trim(),
+      lastName: (lastName as string).trim(),
+      phoneNumber: phoneNumber.trim(),
+      shopName: (shopName as string).trim(),
+      description: (description as string).trim(),
+      city: (city as string).trim(),
+      address: (address as string).trim(),
+      bankName: (bankName as string).trim(),
+      accountHolderName: (accountHolderName as string).trim(),
+      accountNumber: (accountNumber as string).trim(),
+      mobileMoneyNumber: typeof mobileMoneyNumber === "string" ? mobileMoneyNumber.trim() : "",
+      status: "pending",
+      commissionRate: 0.05,
+    },
+    { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+  );
+  res.status(201).json(seller);
+});
+
+app.get("/api/seller/me", verifyAuth, async (req: AuthedRequest, res) => {
+  const seller = await Seller.findOne({ uid: req.user!.uid }).select("-accountNumber -mobileMoneyNumber").lean();
+  res.json(seller || null);
+});
+
+app.get("/api/admin/sellers", verifyAuth, requireAdmin, async (_req, res) => {
+  const sellers = await Seller.find().sort({ createdAt: -1 }).lean();
+  res.json(sellers);
+});
+
+app.patch("/api/admin/sellers/:uid/status", actionLimiter, verifyAuth, requireAdmin, async (req, res) => {
+  const { status } = req.body as { status?: unknown };
+  if (status !== "approved" && status !== "rejected") {
+    return res.status(400).json({ error: "Seller status must be approved or rejected." });
+  }
+  const seller = await Seller.findOneAndUpdate(
+    { uid: req.params.uid, status: "pending" },
+    { status },
+    { new: true, runValidators: true },
+  );
+  if (!seller) return res.status(404).json({ error: "Pending seller application not found." });
+  res.json(seller);
+});
+
+app.get("/api/seller/products", verifyAuth, async (req: AuthedRequest, res) => {
+  const seller = await Seller.findOne({ uid: req.user!.uid });
+  if (!seller) return res.status(403).json({ error: "Submit a seller application before managing products." });
+  const products = await Product.find({ sellerId: seller.uid }).sort({ createdAt: -1 }).lean();
+  res.json(products);
+});
+
+app.post("/api/seller/products", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  const seller = await Seller.findOne({ uid: req.user!.uid });
+  if (!seller || seller.status !== "approved") {
+    return res.status(403).json({ error: "Your seller application must be approved before listing products." });
+  }
+  if (req.user?.email_verified !== true) {
+    return res.status(403).json({ error: "Verify your email before listing products." });
+  }
+  const { name, category, description, price, image, kind, assets, specifications } = req.body as Record<string, unknown>;
+  if (
+    typeof name !== "string" || !name.trim() || name.trim().length > 150 ||
+    typeof category !== "string" || !category.trim() ||
+    typeof description !== "string" || !description.trim() || description.trim().length > 2000 ||
+    typeof price !== "number" || !Number.isFinite(price) || price <= 0 ||
+    !isCloudinaryUrl(image) ||
+    (kind !== "physical" && kind !== "digital") ||
+    (specifications !== undefined && !validateSpecifications(specifications)) ||
+    !Array.isArray(assets) || assets.length > 10 ||
+    assets.some((asset) =>
+      !asset || typeof asset !== "object" ||
+      typeof (asset as { name?: unknown }).name !== "string" ||
+      !(asset as { name: string }).name.trim() ||
+      !isCloudinaryUrl((asset as { url?: unknown }).url),
+    )
+  ) {
+    return res.status(400).json({ error: "Provide valid product details, a Cloudinary image, a product type, and up to 10 Cloudinary files." });
+  }
+  if (kind === "physical" && assets.length > 0) {
+    return res.status(400).json({ error: "Downloadable files can only be attached to digital products." });
+  }
+  const categoryRecord = await Category.findOne({ name: category.trim(), active: true }).lean();
+  if (!categoryRecord) return res.status(400).json({ error: "Choose an active product category." });
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 45) || "seller-product";
+  const id = `${slug}-${randomUUID().slice(0, 8)}`;
+  const product = await Product.create({
+    id,
+    name: name.trim(),
+    category: category.trim(),
+    description: description.trim(),
+    price: Math.round(price * 100) / 100,
+    image,
+    kind,
+    assets: assets.map((asset) => ({
+      name: (asset as { name: string }).name.trim().slice(0, 150),
+      url: (asset as { url: string }).url,
+    })),
+    specifications: specifications || [],
+    sellerId: seller.uid,
+    sellerListingStatus: "pending",
+    active: false,
+  });
+  res.status(201).json(product);
+});
+
+app.get("/api/admin/seller-products", verifyAuth, requireAdmin, async (req, res) => {
+  const status = typeof req.query.status === "string" ? req.query.status : "pending";
+  if (!["pending", "approved", "rejected"].includes(status)) {
+    return res.status(400).json({ error: "Invalid listing status." });
+  }
+  const listingFilter: Record<string, unknown> = {
+    sellerId: { $exists: true },
+    sellerListingStatus: status as IProduct["sellerListingStatus"],
+  };
+  const products = await Product.find(listingFilter).sort({ createdAt: -1 }).lean();
+  res.json(products);
+});
+
+app.patch("/api/admin/seller-products/:id/status", actionLimiter, verifyAuth, requireAdmin, async (req, res) => {
+  const { status } = req.body as { status?: unknown };
+  if (status !== "approved" && status !== "rejected") {
+    return res.status(400).json({ error: "Listing status must be approved or rejected." });
+  }
+  const product = await Product.findOneAndUpdate(
+    { id: req.params.id, sellerId: { $exists: true }, sellerListingStatus: "pending" },
+    { sellerListingStatus: status, active: status === "approved" },
+    { new: true, runValidators: true },
+  );
+  if (!product) return res.status(404).json({ error: "Pending seller listing not found." });
+  res.json(product);
+});
+
 app.get("/api/products", async (req, res) => {
   const category = typeof req.query.category === "string" ? req.query.category : undefined;
-  const filter = category && category !== "All" ? { active: true, category } : { active: true };
-  const products = await Product.find(filter).sort({ createdAt: -1 }).lean();
-  res.json(products);
+  const approvedSellers = await Seller.find({ status: "approved" }).distinct("uid");
+  const filter: Record<string, unknown> = {
+    active: true,
+    $or: [
+      { sellerId: { $exists: false } },
+      { sellerId: null },
+      { sellerId: { $in: approvedSellers }, sellerListingStatus: "approved" },
+    ],
+  };
+  if (category && category !== "All") filter.category = category;
+  const products = await Product.find(filter).select("-assets").sort({ createdAt: -1 }).lean();
+  const sellerIds = [...new Set(products.map((product) => product.sellerId).filter((uid): uid is string => Boolean(uid)))];
+  const sellers = await Seller.find({ uid: { $in: sellerIds }, status: "approved" })
+    .select("uid shopName city address phoneNumber").lean();
+  const sellerById = new Map(sellers.map((seller) => [seller.uid, seller]));
+  res.json(products.map((product) => {
+    const seller = product.sellerId ? sellerById.get(product.sellerId) : undefined;
+    return asPublicProduct(product, seller ? {
+      shopName: seller.shopName,
+      city: seller.city,
+      address: seller.address,
+      phoneNumber: seller.phoneNumber,
+    } : undefined);
+  }));
 });
 
 app.get("/api/categories", async (_req, res) => {
@@ -198,9 +430,96 @@ app.put("/api/categories/:slug", actionLimiter, verifyAuth, requireAdmin, async 
 });
 
 app.get("/api/products/:id", async (req, res) => {
-  const product = await Product.findOne({ id: req.params.id, active: true }).lean();
+  const product = await Product.findOne({ id: req.params.id, active: true }).select("-assets").lean();
   if (!product) return res.status(404).json({ error: "Product not found" });
-  res.json(product);
+  if (product.sellerId) {
+    const seller = await Seller.findOne({ uid: product.sellerId, status: "approved" }).select("shopName city address phoneNumber").lean();
+    if (!seller || product.sellerListingStatus !== "approved") return res.status(404).json({ error: "Product not found" });
+    return res.json(asPublicProduct(product, {
+      shopName: seller.shopName,
+      city: seller.city,
+      address: seller.address,
+      phoneNumber: seller.phoneNumber,
+    }));
+  }
+  res.json(asPublicProduct(product));
+});
+
+app.get("/api/products/:id/reviews", async (req, res) => {
+  const product = await findPublicProduct(String(req.params.id));
+  if (!product) return res.status(404).json({ error: "Product not found." });
+  const [reviews, upvotes] = await Promise.all([
+    ProductReview.find({ productId: product.id }).sort({ createdAt: -1 }).select("postedBy rating text createdAt").lean(),
+    ProductReaction.countDocuments({ productId: product.id }),
+  ]);
+  res.json({ reviews, upvotes });
+});
+
+app.get("/api/products/:id/reactions/me", verifyAuth, async (req: AuthedRequest, res) => {
+  const product = await findPublicProduct(String(req.params.id));
+  if (!product) return res.status(404).json({ error: "Product not found." });
+  const reacted = await ProductReaction.exists({ productId: product.id, uid: req.user!.uid });
+  res.json({ reacted: Boolean(reacted) });
+});
+
+app.post("/api/products/:id/reactions", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  const product = await findPublicProduct(String(req.params.id));
+  if (!product) return res.status(404).json({ error: "Product not found." });
+  const current = await ProductReaction.findOne({ productId: product.id, uid: req.user!.uid });
+  let reacted: boolean;
+  if (current) {
+    await current.deleteOne();
+    reacted = false;
+  } else {
+    try {
+      await ProductReaction.create({ productId: product.id, uid: req.user!.uid });
+      reacted = true;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === 11000) {
+        reacted = true;
+      } else {
+        throw error;
+      }
+    }
+  }
+  const upvotes = await ProductReaction.countDocuments({ productId: product.id });
+  res.json({ reacted, upvotes });
+});
+
+app.post("/api/products/:id/reviews", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  if (req.user?.email_verified !== true) {
+    return res.status(403).json({ error: "Verify your account email before reviewing products." });
+  }
+  const product = await findPublicProduct(String(req.params.id));
+  if (!product) return res.status(404).json({ error: "Product not found." });
+  const { rating, text } = req.body as { rating?: unknown; text?: unknown };
+  if (!Number.isInteger(rating) || (rating as number) < 1 || (rating as number) > 5 ||
+      typeof text !== "string" || text.trim().length < 2 || text.trim().length > 1500) {
+    return res.status(400).json({ error: "Choose a 1–5 star rating and write a review between 2 and 1500 characters." });
+  }
+  const purchased = await Order.exists({
+    userId: req.user!.uid,
+    paymentStatus: "paid",
+    "items.productId": product.id,
+  });
+  if (!purchased) return res.status(403).json({ error: "Only verified buyers of this product can post a review." });
+  const reviewerProfile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
+  const reviewerName = [reviewerProfile?.firstName, reviewerProfile?.lastName].filter(Boolean).join(" ") || "Verified buyer";
+  try {
+    const review = await ProductReview.create({
+      productId: product.id,
+      uid: req.user!.uid,
+      postedBy: reviewerName,
+      rating: rating as number,
+      text: text.trim(),
+    });
+    return res.status(201).json(review);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === 11000) {
+      return res.status(409).json({ error: "You have already reviewed this product." });
+    }
+    throw error;
+  }
 });
 
 app.post(
@@ -345,14 +664,48 @@ app.post("/api/payments/chapa/initialize", actionLimiter, verifyAuth, async (req
   if (products.length !== new Set(productIds).size) {
     return res.status(400).json({ error: "One or more products are unavailable." });
   }
+  const sellerIds = [...new Set(products.map((product) => product.sellerId).filter((uid): uid is string => Boolean(uid)))];
+  const sellers = await Seller.find({ uid: { $in: sellerIds }, status: "approved" }).lean();
+  if (sellers.length !== sellerIds.length || products.some((product) => product.sellerId && product.sellerListingStatus !== "approved")) {
+    return res.status(400).json({ error: "One or more seller products are no longer available." });
+  }
+  const sellerById = new Map(sellers.map((seller) => [seller.uid, seller]));
   const orderItems = items.map((item) => {
     const product = products.find((candidate) => candidate.id === item.productId);
-    return { productId: product!.id, name: product!.name, price: product!.price, quantity: item.quantity as number };
+    if (!product) throw new Error("Validated checkout product disappeared.");
+    return {
+      productId: product.id,
+      name: product.name,
+      price: product.price,
+      quantity: item.quantity as number,
+      ...(product.sellerId ? { sellerId: product.sellerId } : {}),
+      kind: product.kind || "physical",
+    };
   });
   const subtotalUsd = Math.round(orderItems.reduce((total, item) => total + item.price * item.quantity, 0) * 100) / 100;
   const amountEtb = Math.round(subtotalUsd * exchangeRate * 100) / 100;
   if (amountEtb <= 0) return res.status(400).json({ error: "The order total must be greater than zero." });
   const amountPaid = currency === "USD" ? subtotalUsd : amountEtb;
+  const sellerTotalsUsd = new Map<string, number>();
+  for (const item of orderItems) {
+    if (!item.sellerId) continue;
+    sellerTotalsUsd.set(item.sellerId, (sellerTotalsUsd.get(item.sellerId) || 0) + item.price * item.quantity);
+  }
+  const sellerPayouts = [...sellerTotalsUsd.entries()].map(([sellerId, grossUsd]) => {
+    const seller = sellerById.get(sellerId)!;
+    const grossAmount = Math.round((currency === "USD" ? grossUsd : grossUsd * exchangeRate) * 100) / 100;
+    const commissionAmount = Math.round(grossAmount * 0.05 * 100) / 100;
+    return {
+      sellerId,
+      shopName: seller.shopName,
+      grossAmount,
+      commissionRate: 0.05,
+      commissionAmount,
+      payoutAmount: Math.round((grossAmount - commissionAmount) * 100) / 100,
+      currency,
+      status: "pending" as const,
+    };
+  });
 
   const txRef = `nech-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
@@ -361,6 +714,7 @@ app.post("/api/payments/chapa/initialize", actionLimiter, verifyAuth, async (req
     email: req.user!.email || "",
     phoneNumber: profile?.phoneNumber || undefined,
     items: orderItems,
+    sellerPayouts,
     shipping,
     subtotal: subtotalUsd,
     amountPaid,
@@ -444,6 +798,70 @@ app.get("/api/orders", verifyAuth, async (req: AuthedRequest, res) => {
   res.json(orders);
 });
 
+app.get("/api/orders/:id/downloads", verifyAuth, async (req: AuthedRequest, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
+    return res.status(400).json({ error: "Invalid order ID." });
+  }
+  const order = await Order.findOne({ _id: req.params.id, userId: req.user!.uid }).lean();
+  if (!order) return res.status(404).json({ error: "Order not found." });
+  if (order.paymentStatus !== "paid") return res.status(403).json({ error: "Downloads are available after payment is verified." });
+  const digitalProductIds = order.items.filter((item) => item.kind === "digital").map((item) => item.productId);
+  const products = await Product.find({ id: { $in: digitalProductIds }, kind: "digital", active: true })
+    .select("id name assets sellerId").lean();
+  const ownedProducts = new Set(order.items.filter((item) => item.kind === "digital").map((item) => item.productId));
+  res.json(products
+    .filter((product) => ownedProducts.has(product.id))
+    .map((product) => ({ productId: product.id, name: product.name, assets: product.assets })));
+});
+
+app.get("/api/seller/payouts", verifyAuth, async (req: AuthedRequest, res) => {
+  const seller = await Seller.findOne({ uid: req.user!.uid }).select("uid").lean();
+  if (!seller) return res.status(403).json({ error: "Seller account not found." });
+  const orders = await Order.find({ "sellerPayouts.sellerId": seller.uid, paymentStatus: "paid" })
+    .select("transactionId currency sellerPayouts createdAt").sort({ createdAt: -1 }).lean();
+  res.json(orders.flatMap((order) => {
+    const payout = order.sellerPayouts.find((item) => item.sellerId === seller.uid);
+    return payout ? [{ orderId: order._id, transactionId: order.transactionId, createdAt: order.createdAt, ...payout }] : [];
+  }));
+});
+
+app.get("/api/admin/seller-payouts", verifyAuth, requireAdmin, async (_req, res) => {
+  const orders = await Order.find({ paymentStatus: "paid", "sellerPayouts.0": { $exists: true } })
+    .select("transactionId email sellerPayouts createdAt").sort({ createdAt: -1 }).lean();
+  const sellerIds = [...new Set(orders.flatMap((order) => order.sellerPayouts.map((payout) => payout.sellerId)))];
+  const sellers = await Seller.find({ uid: { $in: sellerIds } })
+    .select("uid bankName accountHolderName accountNumber mobileMoneyNumber").lean();
+  const sellerById = new Map(sellers.map((seller) => [seller.uid, seller]));
+  res.json(orders.flatMap((order) => order.sellerPayouts.map((payout) => ({
+    orderId: order._id,
+    transactionId: order.transactionId,
+    buyerEmail: order.email,
+    createdAt: order.createdAt,
+    ...payout,
+    payoutDetails: sellerById.get(payout.sellerId) || null,
+  }))));
+});
+
+app.patch("/api/admin/orders/:id/seller-payouts/:sellerId", actionLimiter, verifyAuth, requireAdmin, async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
+    return res.status(400).json({ error: "Invalid order ID." });
+  }
+  const { transferReference } = req.body as { transferReference?: unknown };
+  if (typeof transferReference !== "string" || transferReference.trim().length < 3 || transferReference.trim().length > 200) {
+    return res.status(400).json({ error: "Enter a valid bank transfer reference." });
+  }
+  const order = await Order.findOne({ _id: req.params.id, paymentStatus: "paid" });
+  if (!order) return res.status(404).json({ error: "Verified paid order not found." });
+  const payout = order.sellerPayouts.find((item) => item.sellerId === req.params.sellerId);
+  if (!payout) return res.status(404).json({ error: "Seller payout not found." });
+  if (payout.status === "transferred") return res.status(409).json({ error: "This seller payout is already marked as transferred." });
+  payout.status = "transferred";
+  payout.transferReference = transferReference.trim();
+  payout.transferredAt = new Date();
+  await order.save();
+  res.json({ message: "Seller payout recorded.", payout });
+});
+
 app.get(
   "/api/admin/orders",
   verifyAuth,
@@ -482,6 +900,128 @@ app.patch(
     res.json(order);
   },
 );
+
+app.get("/api/conversations", verifyAuth, async (req: AuthedRequest, res) => {
+  const filter = req.user?.admin === true
+    ? {}
+    : { $or: [{ buyerUid: req.user!.uid }, { sellerUid: req.user!.uid }] };
+  const conversations = await Conversation.find(filter)
+    .select("-messages -buyerEmail")
+    .sort({ lastMessageAt: -1 })
+    .lean();
+  res.json(conversations);
+});
+
+app.post("/api/conversations", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  const { productId, orderId } = req.body as { productId?: unknown; orderId?: unknown };
+  const isSupport = typeof orderId === "string";
+  if (isSupport === (typeof productId === "string")) {
+    return res.status(400).json({ error: "Choose a product seller or an order for support." });
+  }
+
+  const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
+  const buyerName = [profile?.firstName, profile?.lastName].filter(Boolean).join(" ") ||
+    req.user!.email?.split("@")[0] || "Customer";
+  const buyerFields = {
+    buyerUid: req.user!.uid,
+    buyerName,
+    buyerEmail: req.user!.email || "",
+  };
+
+  if (isSupport) {
+    if (!mongoose.Types.ObjectId.isValid(orderId as string)) {
+      return res.status(400).json({ error: "Invalid order ID." });
+    }
+    const order = await Order.findOne({ _id: orderId, userId: req.user!.uid }).select("_id transactionId").lean();
+    if (!order) return res.status(404).json({ error: "Your order was not found." });
+    let conversation = await Conversation.findOne({ kind: "support", buyerUid: req.user!.uid, orderId: String(order._id) });
+    if (!conversation) {
+      conversation = await Conversation.create({
+        kind: "support",
+        ...buyerFields,
+        orderId: String(order._id),
+        productName: `Order ${order.transactionId}`,
+      });
+    }
+    return res.status(200).json(conversation);
+  }
+
+  if (typeof productId !== "string" || !productId.trim()) {
+    return res.status(400).json({ error: "A product is required to contact its seller." });
+  }
+  const product = await Product.findOne({ id: productId.trim(), active: true }).select("id name sellerId sellerListingStatus").lean();
+  if (!product || !product.sellerId || product.sellerListingStatus !== "approved") {
+    return res.status(404).json({ error: "This product does not have an available marketplace seller." });
+  }
+  if (product.sellerId === req.user!.uid) {
+    return res.status(403).json({ error: "You cannot start a buyer conversation with your own shop." });
+  }
+  const seller = await Seller.findOne({ uid: product.sellerId, status: "approved" }).select("uid shopName").lean();
+  if (!seller) return res.status(404).json({ error: "The seller is not available." });
+  let conversation = await Conversation.findOne({
+    kind: "seller",
+    buyerUid: req.user!.uid,
+    sellerUid: seller.uid,
+    productId: product.id,
+  });
+  if (!conversation) {
+    conversation = await Conversation.create({
+      kind: "seller",
+      ...buyerFields,
+      sellerUid: seller.uid,
+      sellerName: seller.shopName,
+      productId: product.id,
+      productName: product.name,
+    });
+  }
+  res.status(200).json(conversation);
+});
+
+app.get("/api/conversations/:id", verifyAuth, async (req: AuthedRequest, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
+    return res.status(400).json({ error: "Invalid conversation ID." });
+  }
+  const conversation = await Conversation.findById(req.params.id).select("-buyerEmail");
+  if (!conversation) return res.status(404).json({ error: "Conversation not found." });
+  const canAccess = req.user?.admin === true ||
+    conversation.buyerUid === req.user!.uid ||
+    conversation.sellerUid === req.user!.uid;
+  if (!canAccess) return res.status(403).json({ error: "You do not have access to this conversation." });
+  res.json(conversation);
+});
+
+app.post("/api/conversations/:id/messages", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
+    return res.status(400).json({ error: "Invalid conversation ID." });
+  }
+  const { text } = req.body as { text?: unknown };
+  if (typeof text !== "string" || text.trim().length < 1 || text.trim().length > 4000) {
+    return res.status(400).json({ error: "Messages must be between 1 and 4000 characters." });
+  }
+  const conversation = await Conversation.findById(req.params.id);
+  if (!conversation) return res.status(404).json({ error: "Conversation not found." });
+  const canAccess = req.user?.admin === true ||
+    conversation.buyerUid === req.user!.uid ||
+    conversation.sellerUid === req.user!.uid;
+  if (!canAccess) return res.status(403).json({ error: "You do not have access to this conversation." });
+  const profile = await UserProfile.findOne({ uid: req.user!.uid }).lean();
+  const displayName = req.user?.admin === true
+    ? "Nech Work Support"
+    : [profile?.firstName, profile?.lastName].filter(Boolean).join(" ") ||
+      req.user!.email?.split("@")[0] || "Customer";
+  const sentAt = new Date();
+  conversation.messages.push({
+    senderUid: req.user!.uid,
+    senderName: displayName,
+    text: text.trim(),
+    createdAt: sentAt,
+  });
+  if (conversation.messages.length > 500) conversation.messages.splice(0, conversation.messages.length - 500);
+  conversation.lastMessageAt = sentAt;
+  conversation.lastMessageText = text.trim();
+  await conversation.save();
+  res.status(201).json(conversation.messages[conversation.messages.length - 1]);
+});
 
 app.get("/api/articles", async (req, res) => {
   const articles = await Article.find();

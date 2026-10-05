@@ -5,6 +5,21 @@ interface OrderItem {
   name: string;
   price: number;
   quantity: number;
+  sellerId?: string;
+  kind?: "physical" | "digital";
+}
+
+interface SellerPayout {
+  sellerId: string;
+  shopName: string;
+  grossAmount: number;
+  commissionRate: number;
+  commissionAmount: number;
+  payoutAmount: number;
+  currency: string;
+  status: "pending" | "transferred";
+  transferReference?: string;
+  transferredAt?: Date;
 }
 
 export const PAYMENT_METHODS = ["chapa", "telebirr", "cbe", "abyssinia", "other", "manual"] as const;
@@ -25,10 +40,13 @@ export const ORDER_STATUSES = [
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
 export interface IOrder extends Document {
+  createdAt: Date;
+  updatedAt: Date;
   userId: string;
   email: string;
   phoneNumber?: string;
   items: Types.DocumentArray<OrderItem>;
+  sellerPayouts: Types.DocumentArray<SellerPayout>;
   shipping: {
     firstName: string;
     lastName: string;
@@ -54,6 +72,24 @@ const OrderItemSchema = new Schema<OrderItem>(
     name: { type: String, required: true },
     price: { type: Number, required: true, min: 0 },
     quantity: { type: Number, required: true, min: 1, max: 99 },
+    sellerId: { type: String },
+    kind: { type: String, enum: ["physical", "digital"], default: "physical" },
+  },
+  { _id: false },
+);
+
+const SellerPayoutSchema = new Schema<SellerPayout>(
+  {
+    sellerId: { type: String, required: true },
+    shopName: { type: String, required: true, trim: true },
+    grossAmount: { type: Number, required: true, min: 0 },
+    commissionRate: { type: Number, required: true, min: 0, max: 1 },
+    commissionAmount: { type: Number, required: true, min: 0 },
+    payoutAmount: { type: Number, required: true, min: 0 },
+    currency: { type: String, required: true, uppercase: true, trim: true },
+    status: { type: String, enum: ["pending", "transferred"], required: true, default: "pending" },
+    transferReference: { type: String, trim: true, maxlength: 200 },
+    transferredAt: { type: Date },
   },
   { _id: false },
 );
@@ -64,6 +100,7 @@ const OrderSchema = new Schema<IOrder>(
     email: { type: String, required: true, trim: true },
     phoneNumber: { type: String, trim: true },
     items: { type: [OrderItemSchema], required: true, validate: (value: OrderItem[]) => value.length > 0 },
+    sellerPayouts: { type: [SellerPayoutSchema], default: [] },
     shipping: {
       firstName: { type: String, required: true, trim: true },
       lastName: { type: String, required: true, trim: true },

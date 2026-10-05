@@ -9,6 +9,11 @@ export interface IProduct extends Document {
   image: string;
   badge?: string;
   active: boolean;
+  sellerId?: string;
+  sellerListingStatus: "pending" | "approved" | "rejected";
+  kind: "physical" | "digital";
+  assets: { name: string; url: string }[];
+  specifications: { name: string; value: string }[];
 }
 
 const ProductSchema = new Schema<IProduct>(
@@ -21,6 +26,17 @@ const ProductSchema = new Schema<IProduct>(
     image: { type: String, required: true, trim: true },
     badge: { type: String, trim: true },
     active: { type: Boolean, default: true },
+    sellerId: { type: String, index: true },
+    sellerListingStatus: { type: String, enum: ["pending", "approved", "rejected"], default: "approved", index: true },
+    kind: { type: String, enum: ["physical", "digital"], default: "physical" },
+    assets: {
+      type: [{ name: { type: String, required: true, trim: true }, url: { type: String, required: true, trim: true } }],
+      default: [],
+    },
+    specifications: {
+      type: [{ name: { type: String, required: true, trim: true }, value: { type: String, required: true, trim: true } }],
+      default: [],
+    },
   },
   { timestamps: true },
 );
