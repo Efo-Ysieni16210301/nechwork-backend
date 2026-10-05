@@ -10,6 +10,7 @@ export interface ISeller extends Document {
   lastName: string;
   phoneNumber: string;
   shopName: string;
+  logoUrl?: string;
   description: string;
   city: string;
   address: string;
@@ -29,6 +30,7 @@ const SellerSchema = new Schema<ISeller>(
     lastName: { type: String, required: true, trim: true },
     phoneNumber: { type: String, required: true, trim: true },
     shopName: { type: String, required: true, trim: true, maxlength: 100 },
+    logoUrl: { type: String, trim: true, default: "" },
     description: { type: String, required: true, trim: true, maxlength: 1000 },
     city: { type: String, required: true, trim: true, maxlength: 100 },
     address: { type: String, required: true, trim: true, maxlength: 300 },

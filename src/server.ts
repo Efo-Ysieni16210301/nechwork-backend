@@ -15,6 +15,7 @@ import { categorySlug, defaultCategories } from "./categories";
 import GalleryImage from "./models/GalleryImage";
 import NewsletterSubscriber from "./models/NewsletterSubscriber";
 import Seller from "./models/Seller";
+import SiteContent from "./models/SiteContent";
 import Conversation from "./models/Conversation";
 import ProductReview from "./models/ProductReview";
 import ProductReaction from "./models/ProductReaction";
@@ -36,6 +37,79 @@ app.use(express.json());
 
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+const siteContentFields = [
+  "brandName", "brandLogoUrl", "announcementText", "homeEyebrow", "homeTitle",
+  "homeEmphasis", "homeLead", "homeImageOne", "homeImageTwo", "homeImageThree",
+  "aboutTitle", "aboutLead", "aboutStoryHeading",
+  "homeRitualEyebrow", "homeRitualTitle", "homeRitualAction",
+  "homeFeaturedEyebrow", "homeFeaturedTitle", "homeCategoryEyebrow",
+  "homeCategoryTitle", "homeOriginEyebrow", "homeOriginTitle", "homeTrustEyebrow",
+  "homeTrustTitle", "homeTrustBody", "homeProcessEyebrow", "homeProcessTitle",
+  "homeProcessStepOneTitle", "homeProcessStepOneBody", "homeProcessStepTwoTitle",
+  "homeProcessStepTwoBody", "homeProcessStepThreeTitle", "homeProcessStepThreeBody",
+  "homeNewsletterEyebrow", "homeNewsletterTitle", "homeNewsletterBody",
+  "aboutStoryBody", "aboutCoverageHeading", "aboutCoverageBody",
+  "aboutMethodHeading", "aboutMethodBody", "footerTitle", "footerText",
+  "contactEmail", "contactOffices", "telegramUsername",
+] as const;
+
+app.get("/api/site-content", async (_req, res) => {
+  const content = await SiteContent.findOne({ key: "main" }).lean();
+  res.json(content || new SiteContent().toObject());
+});
+
+app.put("/api/admin/site-content", actionLimiter, verifyAuth, requireAdmin, async (req, res) => {
+  const body = req.body as Record<string, unknown>;
+  const update: Record<string, string> = {};
+  for (const field of siteContentFields) {
+    if (typeof body[field] !== "string") {
+      return res.status(400).json({ error: "Complete every site-content field before saving." });
+    }
+    update[field] = body[field].trim();
+  }
+  if (
+    siteContentFields.some((field) => field !== "brandLogoUrl" && !update[field]) ||
+    (update.brandLogoUrl !== "" && !isCloudinaryUrl(update.brandLogoUrl)) ||
+    ["homeImageOne", "homeImageTwo", "homeImageThree"].some((field) => {
+      try {
+        return new URL(update[field]).protocol !== "https:";
+      } catch {
+        return true;
+      }
+    }) ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(update.contactEmail) ||
+    !/^[A-Za-z0-9_]{1,64}$/.test(update.telegramUsername)
+  ) {
+    return res.status(400).json({ error: "Enter valid site content, a Cloudinary logo, contact email, and Telegram username." });
+  }
+  const limits: Record<(typeof siteContentFields)[number], number> = {
+    brandName: 80, brandLogoUrl: 1000, announcementText: 250, homeEyebrow: 120,
+    homeTitle: 120, homeEmphasis: 120, homeLead: 500,
+    homeImageOne: 1000, homeImageTwo: 1000, homeImageThree: 1000, aboutTitle: 120,
+    homeRitualEyebrow: 120, homeRitualTitle: 250, homeRitualAction: 100,
+    homeFeaturedEyebrow: 120, homeFeaturedTitle: 150, homeCategoryEyebrow: 120,
+    homeCategoryTitle: 150, homeOriginEyebrow: 120, homeOriginTitle: 150,
+    homeTrustEyebrow: 120, homeTrustTitle: 200, homeTrustBody: 500,
+    homeProcessEyebrow: 120, homeProcessTitle: 150, homeProcessStepOneTitle: 150,
+    homeProcessStepOneBody: 500, homeProcessStepTwoTitle: 150, homeProcessStepTwoBody: 500,
+    homeProcessStepThreeTitle: 150, homeProcessStepThreeBody: 500,
+    homeNewsletterEyebrow: 120, homeNewsletterTitle: 150, homeNewsletterBody: 500,
+    aboutLead: 1000, aboutStoryHeading: 120, aboutStoryBody: 2000,
+    aboutCoverageHeading: 120, aboutCoverageBody: 2000, aboutMethodHeading: 120,
+    aboutMethodBody: 2000, footerTitle: 120, footerText: 500, contactEmail: 254,
+    contactOffices: 2000, telegramUsername: 64,
+  };
+  if (siteContentFields.some((field) => update[field].length > limits[field])) {
+    return res.status(400).json({ error: "One or more site-content fields exceed their maximum length." });
+  }
+  const content = await SiteContent.findOneAndUpdate(
+    { key: "main" },
+    { ...update, key: "main" },
+    { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+  ).lean();
+  res.json(content);
 });
 
 const verifyChapaOrder = async (order: InstanceType<typeof Order>) => {
@@ -81,6 +155,8 @@ const verifyChapaOrder = async (order: InstanceType<typeof Order>) => {
 
 const asPublicProduct = <T extends { assets?: unknown }>(product: T, seller?: {
   shopName: string;
+  logoUrl: string;
+  description: string;
   city: string;
   address: string;
   phoneNumber: string;
@@ -269,9 +345,48 @@ app.get("/api/seller/me", verifyAuth, async (req: AuthedRequest, res) => {
   res.json(seller || null);
 });
 
+const validateSellerProfile = (body: Record<string, unknown>) => {
+  const fields = ["shopName", "logoUrl", "description", "city", "address", "phoneNumber"] as const;
+  if (fields.some((field) => typeof body[field] !== "string")) return null;
+  const profile = Object.fromEntries(fields.map((field) => [field, (body[field] as string).trim()])) as Record<(typeof fields)[number], string>;
+  if (
+    !profile.shopName || profile.shopName.length > 100 ||
+    (profile.logoUrl !== "" && !isCloudinaryUrl(profile.logoUrl)) ||
+    !profile.description || profile.description.length > 1000 ||
+    !profile.city || profile.city.length > 100 ||
+    !profile.address || profile.address.length > 300 ||
+    !/^\+[1-9]\d{7,14}$/.test(profile.phoneNumber)
+  ) return null;
+  return profile;
+};
+
+app.put("/api/seller/profile", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  const profile = validateSellerProfile(req.body as Record<string, unknown>);
+  if (!profile) return res.status(400).json({ error: "Enter a valid shop name, Cloudinary logo, description, location, and international phone number." });
+  const seller = await Seller.findOneAndUpdate(
+    { uid: req.user!.uid, status: "approved" },
+    profile,
+    { new: true, runValidators: true },
+  ).select("-accountNumber -mobileMoneyNumber").lean();
+  if (!seller) return res.status(403).json({ error: "Only approved sellers can update their shop profile." });
+  res.json(seller);
+});
+
 app.get("/api/admin/sellers", verifyAuth, requireAdmin, async (_req, res) => {
   const sellers = await Seller.find().sort({ createdAt: -1 }).lean();
   res.json(sellers);
+});
+
+app.put("/api/admin/sellers/:uid/profile", actionLimiter, verifyAuth, requireAdmin, async (req, res) => {
+  const profile = validateSellerProfile(req.body as Record<string, unknown>);
+  if (!profile) return res.status(400).json({ error: "Enter a valid shop name, Cloudinary logo, description, location, and international phone number." });
+  const seller = await Seller.findOneAndUpdate(
+    { uid: req.params.uid },
+    profile,
+    { new: true, runValidators: true },
+  ).lean();
+  if (!seller) return res.status(404).json({ error: "Seller not found." });
+  res.json(seller);
 });
 
 app.patch("/api/admin/sellers/:uid/status", actionLimiter, verifyAuth, requireAdmin, async (req, res) => {
@@ -349,6 +464,59 @@ app.post("/api/seller/products", actionLimiter, verifyAuth, async (req: AuthedRe
   res.status(201).json(product);
 });
 
+app.put("/api/seller/products/:id", actionLimiter, verifyAuth, async (req: AuthedRequest, res) => {
+  const seller = await Seller.findOne({ uid: req.user!.uid, status: "approved" });
+  if (!seller) return res.status(403).json({ error: "Your approved seller account is required to edit products." });
+  if (req.user?.email_verified !== true) {
+    return res.status(403).json({ error: "Verify your email before editing products." });
+  }
+  const { name, category, description, price, image, kind, assets, specifications } = req.body as Record<string, unknown>;
+  if (
+    typeof name !== "string" || !name.trim() || name.trim().length > 150 ||
+    typeof category !== "string" || !category.trim() ||
+    typeof description !== "string" || !description.trim() || description.trim().length > 2000 ||
+    typeof price !== "number" || !Number.isFinite(price) || price <= 0 ||
+    !isCloudinaryUrl(image) ||
+    (kind !== "physical" && kind !== "digital") ||
+    (specifications !== undefined && !validateSpecifications(specifications)) ||
+    !Array.isArray(assets) || assets.length > 10 ||
+    assets.some((asset) =>
+      !asset || typeof asset !== "object" ||
+      typeof (asset as { name?: unknown }).name !== "string" ||
+      !(asset as { name: string }).name.trim() ||
+      !isCloudinaryUrl((asset as { url?: unknown }).url),
+    )
+  ) {
+    return res.status(400).json({ error: "Provide valid product details, a Cloudinary image, a product type, and up to 10 Cloudinary files." });
+  }
+  if (kind === "physical" && assets.length > 0) {
+    return res.status(400).json({ error: "Downloadable files can only be attached to digital products." });
+  }
+  const categoryRecord = await Category.findOne({ name: category.trim(), active: true }).lean();
+  if (!categoryRecord) return res.status(400).json({ error: "Choose an active product category." });
+  const product = await Product.findOneAndUpdate(
+    { id: req.params.id, sellerId: seller.uid },
+    {
+      name: name.trim(),
+      category: category.trim(),
+      description: description.trim(),
+      price: Math.round(price * 100) / 100,
+      image,
+      kind,
+      assets: assets.map((asset) => ({
+        name: (asset as { name: string }).name.trim().slice(0, 150),
+        url: (asset as { url: string }).url,
+      })),
+      specifications: specifications || [],
+      sellerListingStatus: "pending",
+      active: false,
+    },
+    { new: true, runValidators: true },
+  );
+  if (!product) return res.status(404).json({ error: "Your product listing was not found." });
+  res.json(product);
+});
+
 app.get("/api/admin/seller-products", verifyAuth, requireAdmin, async (req, res) => {
   const status = typeof req.query.status === "string" ? req.query.status : "pending";
   if (!["pending", "approved", "rejected"].includes(status)) {
@@ -391,12 +559,14 @@ app.get("/api/products", async (req, res) => {
   const products = await Product.find(filter).select("-assets").sort({ createdAt: -1 }).lean();
   const sellerIds = [...new Set(products.map((product) => product.sellerId).filter((uid): uid is string => Boolean(uid)))];
   const sellers = await Seller.find({ uid: { $in: sellerIds }, status: "approved" })
-    .select("uid shopName city address phoneNumber").lean();
+    .select("uid shopName logoUrl description city address phoneNumber").lean();
   const sellerById = new Map(sellers.map((seller) => [seller.uid, seller]));
   res.json(products.map((product) => {
     const seller = product.sellerId ? sellerById.get(product.sellerId) : undefined;
     return asPublicProduct(product, seller ? {
       shopName: seller.shopName,
+      logoUrl: seller.logoUrl || "",
+      description: seller.description,
       city: seller.city,
       address: seller.address,
       phoneNumber: seller.phoneNumber,
@@ -433,10 +603,12 @@ app.get("/api/products/:id", async (req, res) => {
   const product = await Product.findOne({ id: req.params.id, active: true }).select("-assets").lean();
   if (!product) return res.status(404).json({ error: "Product not found" });
   if (product.sellerId) {
-    const seller = await Seller.findOne({ uid: product.sellerId, status: "approved" }).select("shopName city address phoneNumber").lean();
+    const seller = await Seller.findOne({ uid: product.sellerId, status: "approved" }).select("shopName logoUrl description city address phoneNumber").lean();
     if (!seller || product.sellerListingStatus !== "approved") return res.status(404).json({ error: "Product not found" });
     return res.json(asPublicProduct(product, {
       shopName: seller.shopName,
+      logoUrl: seller.logoUrl || "",
+      description: seller.description,
       city: seller.city,
       address: seller.address,
       phoneNumber: seller.phoneNumber,
@@ -1199,7 +1371,7 @@ app.put(
 
     if (title) article.title = title;
     if (Array.isArray(content)) article.content = content;
-    if (typeof image === "string" && image.trim()) article.image = image.trim();
+    if (typeof image === "string") article.image = image.trim();
 
     await article.save();
     res.json(article);
