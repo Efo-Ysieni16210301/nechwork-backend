@@ -48,6 +48,9 @@ export interface ISiteContent extends Document {
   contactEmail: string;
   contactOffices: string;
   telegramUsername: string;
+  shopVideoUrl: string;
+  shopVideoTitle: string;
+  shopVideoCategory: string;
 }
 
 const SiteContentSchema = new Schema<ISiteContent>(
@@ -99,6 +102,9 @@ const SiteContentSchema = new Schema<ISiteContent>(
     contactEmail: { type: String, required: true, trim: true, lowercase: true, default: "aaron162103@gmail.com", maxlength: 254 },
     contactOffices: { type: String, required: true, trim: true, default: "Addis Ababa main office | +251948931000 | Lideta, Nech Work Building B01\nGondar branch office | +251918992121 | Gondar,Buna Tera Building B01\nMetema branch office | +251936111212 | Metema", maxlength: 2000 },
     telegramUsername: { type: String, required: true, trim: true, default: "Luv16210301", maxlength: 64 },
+    shopVideoUrl: { type: String, trim: true, default: "", maxlength: 1500 },
+    shopVideoTitle: { type: String, trim: true, default: "A taste of Ethiopia", maxlength: 150 },
+    shopVideoCategory: { type: String, trim: true, default: "Coffee", maxlength: 100 },
   },
   { timestamps: true },
 );

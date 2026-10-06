@@ -6,6 +6,8 @@ export interface IProduct extends Document {
   category: string;
   description: string;
   price: number;
+  createdAt: Date;
+  updatedAt: Date;
   image: string;
   badge?: string;
   active: boolean;

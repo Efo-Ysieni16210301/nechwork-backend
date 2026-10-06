@@ -53,6 +53,7 @@ const siteContentFields = [
   "aboutStoryBody", "aboutCoverageHeading", "aboutCoverageBody",
   "aboutMethodHeading", "aboutMethodBody", "footerTitle", "footerText",
   "contactEmail", "contactOffices", "telegramUsername",
+  "shopVideoUrl", "shopVideoTitle", "shopVideoCategory",
 ] as const;
 
 app.get("/api/site-content", async (_req, res) => {
@@ -70,7 +71,7 @@ app.put("/api/admin/site-content", actionLimiter, verifyAuth, requireAdmin, asyn
     update[field] = body[field].trim();
   }
   if (
-    siteContentFields.some((field) => field !== "brandLogoUrl" && !update[field]) ||
+    siteContentFields.some((field) => field !== "brandLogoUrl" && field !== "shopVideoUrl" && !update[field]) ||
     (update.brandLogoUrl !== "" && !isCloudinaryUrl(update.brandLogoUrl)) ||
     ["homeImageOne", "homeImageTwo", "homeImageThree"].some((field) => {
       try {
@@ -80,7 +81,8 @@ app.put("/api/admin/site-content", actionLimiter, verifyAuth, requireAdmin, asyn
       }
     }) ||
     !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(update.contactEmail) ||
-    !/^[A-Za-z0-9_]{1,64}$/.test(update.telegramUsername)
+    !/^[A-Za-z0-9_]{1,64}$/.test(update.telegramUsername) ||
+    (update.shopVideoUrl !== "" && !isAllowedVideoUrl(update.shopVideoUrl))
   ) {
     return res.status(400).json({ error: "Enter valid site content, a Cloudinary logo, contact email, and Telegram username." });
   }
@@ -100,6 +102,7 @@ app.put("/api/admin/site-content", actionLimiter, verifyAuth, requireAdmin, asyn
     aboutCoverageHeading: 120, aboutCoverageBody: 2000, aboutMethodHeading: 120,
     aboutMethodBody: 2000, footerTitle: 120, footerText: 500, contactEmail: 254,
     contactOffices: 2000, telegramUsername: 64,
+    shopVideoUrl: 1500, shopVideoTitle: 150, shopVideoCategory: 100,
   };
   if (siteContentFields.some((field) => update[field].length > limits[field])) {
     return res.status(400).json({ error: "One or more site-content fields exceed their maximum length." });
@@ -170,6 +173,22 @@ const isCloudinaryUrl = (value: unknown): value is string => {
   try {
     const url = new URL(value);
     return url.protocol === "https:" && url.hostname === "res.cloudinary.com";
+  } catch {
+    return false;
+  }
+};
+
+const isAllowedVideoUrl = (value: string) => {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") return false;
+    const host = url.hostname.toLowerCase();
+    return (host === "res.cloudinary.com" && url.pathname.includes("/video/upload/")) ||
+      host === "youtube.com" || host === "www.youtube.com" ||
+      host === "youtu.be" || host === "www.youtube-nocookie.com" ||
+      host === "vimeo.com" || host === "www.vimeo.com" ||
+      host === "player.vimeo.com" ||
+      /\.(mp4|webm|ogg)$/i.test(url.pathname);
   } catch {
     return false;
   }
@@ -557,20 +576,41 @@ app.get("/api/products", async (req, res) => {
   };
   if (category && category !== "All") filter.category = category;
   const products = await Product.find(filter).select("-assets").sort({ createdAt: -1 }).lean();
+  const productIds = products.map((product) => product.id);
+  const [reactionCounts, reviewCounts, orderCounts] = await Promise.all([
+    ProductReaction.aggregate<{ _id: string; count: number }>([
+      { $match: { productId: { $in: productIds } } },
+      { $group: { _id: "$productId", count: { $sum: 1 } } },
+    ]),
+    ProductReview.aggregate<{ _id: string; count: number }>([
+      { $match: { productId: { $in: productIds } } },
+      { $group: { _id: "$productId", count: { $sum: 1 } } },
+    ]),
+    Order.aggregate<{ _id: string; count: number }>([
+      { $match: { paymentStatus: "paid" } },
+      { $unwind: "$items" },
+      { $match: { "items.productId": { $in: productIds } } },
+      { $group: { _id: "$items.productId", count: { $sum: "$items.quantity" } } },
+    ]),
+  ]);
+  const popularity = new Map<string, number>();
+  for (const group of [...reactionCounts, ...reviewCounts, ...orderCounts]) {
+    popularity.set(group._id, (popularity.get(group._id) || 0) + group.count);
+  }
   const sellerIds = [...new Set(products.map((product) => product.sellerId).filter((uid): uid is string => Boolean(uid)))];
   const sellers = await Seller.find({ uid: { $in: sellerIds }, status: "approved" })
     .select("uid shopName logoUrl description city address phoneNumber").lean();
   const sellerById = new Map(sellers.map((seller) => [seller.uid, seller]));
   res.json(products.map((product) => {
     const seller = product.sellerId ? sellerById.get(product.sellerId) : undefined;
-    return asPublicProduct(product, seller ? {
+    return { ...asPublicProduct(product, seller ? {
       shopName: seller.shopName,
       logoUrl: seller.logoUrl || "",
       description: seller.description,
       city: seller.city,
       address: seller.address,
       phoneNumber: seller.phoneNumber,
-    } : undefined);
+    } : undefined), popularity: popularity.get(product.id) || 0 };
   }));
 });
 
@@ -700,7 +740,7 @@ app.post(
   verifyAuth,
   requireAdmin,
   async (req: AuthedRequest, res) => {
-    const { id, name, category, description, price, image, badge } = req.body;
+    const { id, name, category, description, price, image, badge, specifications } = req.body;
     if (
       typeof id !== "string" ||
       !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id) ||
@@ -714,7 +754,8 @@ app.post(
       !Number.isFinite(price) ||
       price < 0 ||
       typeof image !== "string" ||
-      !image.trim()
+      !image.trim() ||
+      (specifications !== undefined && !validateSpecifications(specifications))
     ) {
       return res.status(400).json({
         error: "id, name, category, description, non-negative price, and image are required",
@@ -730,6 +771,7 @@ app.post(
       price: Math.round(price * 100) / 100,
       image: image.trim(),
       badge: typeof badge === "string" && badge.trim() ? badge.trim() : undefined,
+      specifications: specifications || [],
     });
     res.status(201).json(product);
   },
@@ -741,13 +783,14 @@ app.put(
   verifyAuth,
   requireAdmin,
   async (req: AuthedRequest, res) => {
-    const { name, category, description, price, image, badge } = req.body;
+    const { name, category, description, price, image, badge, specifications } = req.body;
     if (
       typeof name !== "string" || !name.trim() ||
       typeof category !== "string" || !category.trim() ||
       typeof description !== "string" || !description.trim() ||
       typeof price !== "number" || !Number.isFinite(price) || price < 0 ||
-      typeof image !== "string" || !image.trim()
+      typeof image !== "string" || !image.trim() ||
+      (specifications !== undefined && !validateSpecifications(specifications))
     ) {
       return res.status(400).json({
         error: "name, category, description, non-negative price, and image are required",
@@ -762,6 +805,7 @@ app.put(
         price: Math.round(price * 100) / 100,
         image: image.trim(),
         badge: typeof badge === "string" && badge.trim() ? badge.trim() : undefined,
+        specifications: specifications || [],
       },
       { new: true, runValidators: true },
     );
